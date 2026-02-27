@@ -1,30 +1,30 @@
 #!/bin/bash
 ###############################################################################
-# 02_hq-rtr.sh — Настройка HQ-RTR (ALT Linux)
-# Модуль 1: IP, forwarding, NAT, VLAN (OVS), GRE-туннель, OSPF, DHCP
+# 02_hq-rtr.sh — HQ-RTR configuration (ALT Linux)
+# Module 1: IP, forwarding, NAT, VLAN (OVS), GRE tunnel, OSPF, DHCP
 ###############################################################################
 set -e
 
-# ======================== ПЕРЕМЕННЫЕ =========================================
+# ======================== VARIABLES ==========================================
 HOSTNAME="hq-rtr.au-team.irpo"
 DOMAIN="au-team.irpo"
 
-# Интерфейс в сторону ISP
+# Interface towards ISP
 IF_WAN="ens19"
 IP_WAN="172.16.1.1/28"
 GW_WAN="172.16.1.14"
 
-# Интерфейсы для VLAN (через OVS)
+# Interfaces for VLANs (via OVS)
 IF_SRV="ens20"    # VLAN 100 -> HQ-SRV
 IF_CLI="ens21"    # VLAN 200 -> HQ-CLI
 IF_SW="ens22"     # VLAN 999 -> HQ-SW (management)
 
-# IP-адреса VLAN
-IP_VLAN100="192.168.0.62/26"   # Шлюз для HQ-SRV
-IP_VLAN200="192.168.0.78/28"   # Шлюз для HQ-CLI
-IP_VLAN999="192.168.0.86/29"   # Шлюз для HQ-SW
+# VLAN IP addresses
+IP_VLAN100="192.168.0.62/26"   # Gateway for HQ-SRV
+IP_VLAN200="192.168.0.78/28"   # Gateway for HQ-CLI
+IP_VLAN999="192.168.0.86/29"   # Gateway for HQ-SW
 
-# GRE-туннель
+# GRE tunnel
 TUN_NAME="tun1"
 TUN_LOCAL="172.16.1.1"
 TUN_REMOTE="172.16.2.1"
@@ -39,7 +39,7 @@ OSPF_NETWORKS=(
     "192.168.0.80/29"
 )
 
-# DHCP (для VLAN200 — HQ-CLI)
+# DHCP (for VLAN200 — HQ-CLI)
 DHCP_IFACE="vlan200"
 DHCP_SUBNET="192.168.0.64"
 DHCP_NETMASK="255.255.255.240"
@@ -49,16 +49,22 @@ DHCP_ROUTER="192.168.0.78"
 DHCP_DNS="192.168.0.1"
 DHCP_DOMAIN="au-team.irpo"
 
-# Пользователь
+# User
 USER_NAME="net_admin"
 USER_PASS='P@$$word'
 
 # =============================================================================
-echo "=== [1/10] Установка имени хоста ==="
+echo "=== [0/10] Installing required software ==="
+apt-get update -y
+apt-get install -y nftables openvswitch NetworkManager frr dhcp-server
+echo "  Software installed"
+
+# =============================================================================
+echo "=== [1/10] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
 
 # =============================================================================
-echo "=== [2/10] Настройка WAN-интерфейса ($IF_WAN) ==="
+echo "=== [2/10] Configuring WAN interface ($IF_WAN) ==="
 
 WAN_DIR="/etc/net/ifaces/$IF_WAN"
 mkdir -p "$WAN_DIR"
@@ -79,7 +85,7 @@ echo "default via $GW_WAN" > "$WAN_DIR/ipv4route"
 echo "  $IF_WAN -> $IP_WAN, gw $GW_WAN"
 
 # =============================================================================
-echo "=== [3/10] Включение IP forwarding ==="
+echo "=== [3/10] Enabling IP forwarding ==="
 
 SYSCTL_FILE="/etc/net/sysctl.conf"
 if grep -q "^net.ipv4.ip_forward" "$SYSCTL_FILE"; then
@@ -90,9 +96,17 @@ fi
 sysctl -w net.ipv4.ip_forward=1
 
 # =============================================================================
-echo "=== [4/10] Настройка NAT (nftables) ==="
+echo "=== [4/10] Configuring NAT (nftables) ==="
 
 NFTABLES_CONF="/etc/nftables/nftables.nft"
+
+mkdir -p /etc/nftables
+if [ ! -f "$NFTABLES_CONF" ]; then
+    cat > "$NFTABLES_CONF" <<EOF
+#!/usr/sbin/nft -f
+flush ruleset
+EOF
+fi
 
 if ! grep -q "table inet nat" "$NFTABLES_CONF" 2>/dev/null; then
     cat >> "$NFTABLES_CONF" <<EOF
@@ -104,25 +118,28 @@ table inet nat {
     }
 }
 EOF
+    echo "  NAT added (masquerade via $IF_WAN)"
+else
+    echo "  NAT already configured"
 fi
 systemctl enable --now nftables
 
 # =============================================================================
-echo "=== [5/10] Перезапуск сети ==="
+echo "=== [5/10] Restarting network ==="
 systemctl restart network
 sleep 2
 
 # =============================================================================
-echo "=== [6/10] Настройка VLAN через Open vSwitch ==="
+echo "=== [6/10] Configuring VLANs via Open vSwitch ==="
 
 systemctl enable --now openvswitch
 systemctl enable --now NetworkManager
 sleep 2
 
-# Удаляем мост если существует (для идемпотентности)
+# Remove bridge if exists (for idempotency)
 ovs-vsctl --if-exists del-br hq-sw
 
-# Создаём мост и порты
+# Create bridge and ports
 ovs-vsctl add-br hq-sw
 ovs-vsctl add-port hq-sw "$IF_SRV" tag=100
 ovs-vsctl add-port hq-sw "$IF_CLI" tag=200
@@ -138,7 +155,7 @@ sleep 2
 
 ip link set hq-sw up
 
-# Назначаем IP на VLAN-интерфейсы
+# Assign IPs to VLAN interfaces
 ip addr flush dev vlan100 2>/dev/null || true
 ip addr flush dev vlan200 2>/dev/null || true
 ip addr flush dev vlan999 2>/dev/null || true
@@ -155,7 +172,7 @@ echo "  VLAN100: $IP_VLAN100"
 echo "  VLAN200: $IP_VLAN200"
 echo "  VLAN999: $IP_VLAN999"
 
-# Создаём скрипт восстановления VLAN IP после перезагрузки
+# Create VLAN IP restore script for reboots
 cat > /root/ip.sh <<SCRIPT
 #!/bin/bash
 ip link set hq-sw up 2>/dev/null
@@ -172,15 +189,15 @@ ip link set vlan999 up
 SCRIPT
 chmod +x /root/ip.sh
 
-# Добавляем в .bashrc для автозапуска
+# Add to .bashrc for autostart
 if ! grep -q "ip.sh" /root/.bashrc 2>/dev/null; then
     echo "bash /root/ip.sh 2>/dev/null" >> /root/.bashrc
 fi
 
 # =============================================================================
-echo "=== [7/10] Настройка GRE-туннеля ==="
+echo "=== [7/10] Configuring GRE tunnel ==="
 
-# Создаём GRE через nmcli
+# Create GRE via nmcli
 nmcli connection delete "$TUN_NAME" 2>/dev/null || true
 
 nmcli connection add type ip-tunnel \
@@ -199,9 +216,9 @@ nmcli connection up "$TUN_NAME"
 echo "  GRE: $TUN_LOCAL -> $TUN_REMOTE, IP: $TUN_IP"
 
 # =============================================================================
-echo "=== [8/10] Настройка OSPF (FRR) ==="
+echo "=== [8/10] Configuring OSPF (FRR) ==="
 
-# Активируем ospfd
+# Enable ospfd
 FRR_DAEMONS="/etc/frr/daemons"
 if [ -f "$FRR_DAEMONS" ]; then
     sed -i 's/^ospfd=no/ospfd=yes/' "$FRR_DAEMONS"
@@ -210,7 +227,7 @@ fi
 systemctl enable --now frr
 sleep 2
 
-# Конфигурируем OSPF через vtysh
+# Configure OSPF via vtysh
 vtysh <<VTYSH_EOF
 configure terminal
 router ospf
@@ -227,12 +244,12 @@ exit
 write memory
 VTYSH_EOF
 
-echo "  OSPF настроен"
+echo "  OSPF configured"
 
 # =============================================================================
-echo "=== [9/10] Настройка DHCP-сервера (для HQ-CLI через VLAN200) ==="
+echo "=== [9/10] Configuring DHCP server (for HQ-CLI via VLAN200) ==="
 
-# Указываем интерфейс DHCP
+# Set DHCP interface
 DHCPD_SYSCONFIG="/etc/sysconfig/dhcpd"
 if [ -f "$DHCPD_SYSCONFIG" ]; then
     sed -i "s/^DHCPDARGS=.*/DHCPDARGS=$DHCP_IFACE/" "$DHCPD_SYSCONFIG"
@@ -240,9 +257,9 @@ else
     echo "DHCPDARGS=$DHCP_IFACE" > "$DHCPD_SYSCONFIG"
 fi
 
-# Создаём конфигурацию DHCP
+# Create DHCP configuration
 cat > /etc/dhcp/dhcpd.conf <<EOF
-# DHCP конфигурация для HQ-CLI (VLAN200)
+# DHCP configuration for HQ-CLI (VLAN200)
 authoritative;
 
 subnet $DHCP_SUBNET netmask $DHCP_NETMASK {
@@ -256,29 +273,29 @@ subnet $DHCP_SUBNET netmask $DHCP_NETMASK {
 EOF
 
 systemctl enable --now dhcpd
-echo "  DHCP: пул $DHCP_RANGE_START - $DHCP_RANGE_END"
+echo "  DHCP: pool $DHCP_RANGE_START - $DHCP_RANGE_END"
 
 # =============================================================================
-echo "=== [10/10] Создание пользователя ==="
+echo "=== [10/10] Creating user ==="
 
 if ! id "$USER_NAME" &>/dev/null; then
     adduser "$USER_NAME"
     echo "$USER_NAME:$USER_PASS" | chpasswd
     usermod -aG wheel "$USER_NAME"
     echo "$USER_NAME ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
-    echo "  Пользователь $USER_NAME создан"
+    echo "  User $USER_NAME created"
 else
-    echo "  Пользователь $USER_NAME уже существует"
+    echo "  User $USER_NAME already exists"
 fi
 
-# Часовой пояс
+# Timezone
 timedatectl set-timezone Europe/Moscow
 
 echo ""
-echo "=== Проверка ==="
+echo "=== Verification ==="
 ip -c -br a
 echo "---"
 ovs-vsctl show
 echo ""
-echo "=== HQ-RTR настроен ==="
-echo "!!! После настройки BR-RTR может потребоваться перезагрузка обоих роутеров !!!"
+echo "=== HQ-RTR configured ==="
+echo "!!! After configuring BR-RTR, both routers may need to be rebooted !!!"

@@ -1,23 +1,23 @@
 #!/bin/bash
 ###############################################################################
-# 03_br-rtr.sh — Настройка BR-RTR (ALT Linux)
-# Модуль 1: IP, forwarding, NAT, GRE-туннель, OSPF
+# 03_br-rtr.sh — BR-RTR configuration (ALT Linux)
+# Module 1: IP, forwarding, NAT, GRE tunnel, OSPF
 ###############################################################################
 set -e
 
-# ======================== ПЕРЕМЕННЫЕ =========================================
+# ======================== VARIABLES ==========================================
 HOSTNAME="br-rtr.au-team.irpo"
 
-# Интерфейс в сторону ISP
+# Interface towards ISP
 IF_WAN="ens19"
 IP_WAN="172.16.2.1/28"
 GW_WAN="172.16.2.14"
 
-# Интерфейс в сторону BR-SRV
+# Interface towards BR-SRV
 IF_LAN="ens20"
 IP_LAN="192.168.1.30/27"
 
-# GRE-туннель
+# GRE tunnel
 TUN_NAME="tun1"
 TUN_LOCAL="172.16.2.1"
 TUN_REMOTE="172.16.1.1"
@@ -30,16 +30,22 @@ OSPF_NETWORKS=(
     "192.168.1.0/27"
 )
 
-# Пользователь
+# User
 USER_NAME="net_admin"
 USER_PASS='P@$$word'
 
 # =============================================================================
-echo "=== [1/8] Установка имени хоста ==="
+echo "=== [0/8] Installing required software ==="
+apt-get update -y
+apt-get install -y nftables NetworkManager frr
+echo "  Software installed"
+
+# =============================================================================
+echo "=== [1/8] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
 
 # =============================================================================
-echo "=== [2/8] Настройка интерфейсов ==="
+echo "=== [2/8] Configuring interfaces ==="
 
 configure_interface() {
     local iface="$1"
@@ -65,7 +71,7 @@ EOF
 
     if [ -n "$gw" ]; then
         echo "default via $gw" > "$dir/ipv4route"
-        echo "  Шлюз: $gw"
+        echo "  Gateway: $gw"
     fi
 }
 
@@ -73,7 +79,7 @@ configure_interface "$IF_WAN" "$IP_WAN" "$GW_WAN"
 configure_interface "$IF_LAN" "$IP_LAN" ""
 
 # =============================================================================
-echo "=== [3/8] Включение IP forwarding ==="
+echo "=== [3/8] Enabling IP forwarding ==="
 
 SYSCTL_FILE="/etc/net/sysctl.conf"
 if grep -q "^net.ipv4.ip_forward" "$SYSCTL_FILE"; then
@@ -84,9 +90,17 @@ fi
 sysctl -w net.ipv4.ip_forward=1
 
 # =============================================================================
-echo "=== [4/8] Настройка NAT (nftables) ==="
+echo "=== [4/8] Configuring NAT (nftables) ==="
 
 NFTABLES_CONF="/etc/nftables/nftables.nft"
+
+mkdir -p /etc/nftables
+if [ ! -f "$NFTABLES_CONF" ]; then
+    cat > "$NFTABLES_CONF" <<EOF
+#!/usr/sbin/nft -f
+flush ruleset
+EOF
+fi
 
 if ! grep -q "table inet nat" "$NFTABLES_CONF" 2>/dev/null; then
     cat >> "$NFTABLES_CONF" <<EOF
@@ -98,16 +112,19 @@ table inet nat {
     }
 }
 EOF
+    echo "  NAT added (masquerade via $IF_WAN)"
+else
+    echo "  NAT already configured"
 fi
 systemctl enable --now nftables
 
 # =============================================================================
-echo "=== [5/8] Перезапуск сети ==="
+echo "=== [5/8] Restarting network ==="
 systemctl restart network
 sleep 2
 
 # =============================================================================
-echo "=== [6/8] Настройка GRE-туннеля ==="
+echo "=== [6/8] Configuring GRE tunnel ==="
 
 systemctl enable --now NetworkManager
 sleep 2
@@ -130,7 +147,7 @@ nmcli connection up "$TUN_NAME"
 echo "  GRE: $TUN_LOCAL -> $TUN_REMOTE, IP: $TUN_IP"
 
 # =============================================================================
-echo "=== [7/8] Настройка OSPF (FRR) ==="
+echo "=== [7/8] Configuring OSPF (FRR) ==="
 
 FRR_DAEMONS="/etc/frr/daemons"
 if [ -f "$FRR_DAEMONS" ]; then
@@ -156,29 +173,29 @@ exit
 write memory
 VTYSH_EOF
 
-echo "  OSPF настроен"
+echo "  OSPF configured"
 
 # =============================================================================
-echo "=== [8/8] Создание пользователя ==="
+echo "=== [8/8] Creating user ==="
 
 if ! id "$USER_NAME" &>/dev/null; then
     adduser "$USER_NAME"
     echo "$USER_NAME:$USER_PASS" | chpasswd
     usermod -aG wheel "$USER_NAME"
     echo "$USER_NAME ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
-    echo "  Пользователь $USER_NAME создан"
+    echo "  User $USER_NAME created"
 else
-    echo "  Пользователь $USER_NAME уже существует"
+    echo "  User $USER_NAME already exists"
 fi
 
-# Часовой пояс
+# Timezone
 timedatectl set-timezone Europe/Moscow
 
 echo ""
-echo "=== Проверка ==="
+echo "=== Verification ==="
 ip -c -br a
 echo "---"
 ip -c -br r
 echo ""
-echo "=== BR-RTR настроен ==="
-echo "!!! После настройки HQ-RTR может потребоваться перезагрузка обоих роутеров !!!"
+echo "=== BR-RTR configured ==="
+echo "!!! After configuring HQ-RTR, both routers may need to be rebooted !!!"

@@ -1,20 +1,20 @@
 #!/bin/bash
 ###############################################################################
-# 05_hq-cli.sh — Настройка HQ-CLI (ALT Linux)
-# Модуль 1: Имя хоста, DHCP-клиент, часовой пояс
+# 05_hq-cli.sh — HQ-CLI configuration (ALT Linux)
+# Module 1: Hostname, DHCP client, timezone
 ###############################################################################
 set -e
 
-# ======================== ПЕРЕМЕННЫЕ =========================================
+# ======================== VARIABLES ==========================================
 HOSTNAME="hq-cli.au-team.irpo"
 IF_LAN="ens19"
 
 # =============================================================================
-echo "=== [1/3] Установка имени хоста ==="
+echo "=== [1/3] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
 
 # =============================================================================
-echo "=== [2/3] Настройка DHCP-клиента на $IF_LAN ==="
+echo "=== [2/3] Configuring DHCP client on $IF_LAN ==="
 
 IF_DIR="/etc/net/ifaces/$IF_LAN"
 mkdir -p "$IF_DIR"
@@ -30,22 +30,22 @@ NM_CONTROLLED=no
 ONBOOT=yes
 EOF
 
-# Убираем статические настройки если есть
+# Remove static settings if present
 rm -f "$IF_DIR/ipv4address" "$IF_DIR/ipv4route"
 
 systemctl restart network
 sleep 3
 
-echo "  Интерфейс $IF_LAN настроен на DHCP"
+echo "  Interface $IF_LAN configured for DHCP"
 
 # =============================================================================
-echo "=== [3/3] Часовой пояс ==="
+echo "=== [3/3] Timezone ==="
 timedatectl set-timezone Europe/Moscow
 
 echo ""
-echo "=== Проверка ==="
+echo "=== Verification ==="
 ip -c -br a
 echo "---"
 ip -c -br r
 echo ""
-echo "=== HQ-CLI настроен ==="
+echo "=== HQ-CLI configured ==="

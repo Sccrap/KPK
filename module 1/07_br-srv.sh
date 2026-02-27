@@ -1,15 +1,15 @@
 #!/bin/bash
 ###############################################################################
-# 07_br-srv.sh — Настройка BR-SRV (ALT Linux)
-# Модуль 1: IP, пользователи, SSH, часовой пояс
+# 07_br-srv.sh — BR-SRV configuration (ALT Linux)
+# Module 1: IP, users, SSH, timezone
 ###############################################################################
 set -e
 
-# ======================== ПЕРЕМЕННЫЕ =========================================
+# ======================== VARIABLES ==========================================
 HOSTNAME="br-srv.au-team.irpo"
 DOMAIN="au-team.irpo"
 
-# Сетевой интерфейс
+# Network interface
 IF_LAN="ens19"
 IP_LAN="192.168.1.1/27"
 GW_LAN="192.168.1.30"
@@ -24,11 +24,17 @@ SSH_USER_PASS="P@ssw0rd"
 SSH_PORT="2024"
 
 # =============================================================================
-echo "=== [1/5] Установка имени хоста ==="
+echo "=== [0/5] Installing required software ==="
+apt-get update -y
+apt-get install -y openssh-server
+echo "  Software installed"
+
+# =============================================================================
+echo "=== [1/5] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
 
 # =============================================================================
-echo "=== [2/5] Настройка IP-адреса ==="
+echo "=== [2/5] Configuring IP address ==="
 
 IF_DIR="/etc/net/ifaces/$IF_LAN"
 mkdir -p "$IF_DIR"
@@ -47,7 +53,7 @@ EOF
 echo "$IP_LAN" > "$IF_DIR/ipv4address"
 echo "default via $GW_LAN" > "$IF_DIR/ipv4route"
 
-# DNS — указываем на HQ-SRV
+# DNS — point to HQ-SRV
 cat > /etc/resolv.conf <<EOF
 search $DOMAIN
 nameserver $DNS_SERVER
@@ -58,20 +64,20 @@ sleep 2
 echo "  $IF_LAN -> $IP_LAN, gw $GW_LAN"
 
 # =============================================================================
-echo "=== [3/5] Создание пользователя $SSH_USER ==="
+echo "=== [3/5] Creating user $SSH_USER ==="
 
 if ! id "$SSH_USER" &>/dev/null; then
     adduser "$SSH_USER" -u "$SSH_USER_UID"
     echo "$SSH_USER:$SSH_USER_PASS" | chpasswd
     usermod -aG wheel "$SSH_USER"
     echo "$SSH_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-    echo "  Пользователь $SSH_USER (uid=$SSH_USER_UID) создан"
+    echo "  User $SSH_USER (uid=$SSH_USER_UID) created"
 else
-    echo "  Пользователь $SSH_USER уже существует"
+    echo "  User $SSH_USER already exists"
 fi
 
 # =============================================================================
-echo "=== [4/5] Настройка SSH ==="
+echo "=== [4/5] Configuring SSH ==="
 
 SSHD_CONFIG="/etc/openssh/sshd_config"
 
@@ -92,14 +98,14 @@ EOF
 
 systemctl enable --now sshd
 systemctl restart sshd
-echo "  SSH: порт $SSH_PORT, пользователь $SSH_USER"
+echo "  SSH: port $SSH_PORT, user $SSH_USER"
 
 # =============================================================================
-echo "=== [5/5] Часовой пояс ==="
+echo "=== [5/5] Timezone ==="
 timedatectl set-timezone Europe/Moscow
 
 echo ""
-echo "=== Проверка ==="
+echo "=== Verification ==="
 ip -c -br a
 echo ""
-echo "=== BR-SRV настроен ==="
+echo "=== BR-SRV configured ==="

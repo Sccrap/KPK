@@ -1,15 +1,15 @@
 #!/bin/bash
 ###############################################################################
-# 04_hq-srv.sh — Настройка HQ-SRV (ALT Linux)
-# Модуль 1: IP, пользователи, SSH, DNS (BIND), часовой пояс
+# 04_hq-srv.sh — HQ-SRV configuration (ALT Linux)
+# Module 1: IP, users, SSH, DNS (BIND), timezone
 ###############################################################################
 set -e
 
-# ======================== ПЕРЕМЕННЫЕ =========================================
+# ======================== VARIABLES ==========================================
 HOSTNAME="hq-srv.au-team.irpo"
 DOMAIN="au-team.irpo"
 
-# Сетевой интерфейс
+# Network interface
 IF_LAN="ens19"
 IP_LAN="192.168.0.1/26"
 GW_LAN="192.168.0.62"
@@ -18,13 +18,13 @@ GW_LAN="192.168.0.62"
 DNS_SERVER_IP="192.168.0.1"
 DNS_FORWARDER="77.88.8.7"
 
-# Пользователь SSH
+# SSH user
 SSH_USER="sshuser"
 SSH_USER_UID="2026"
 SSH_USER_PASS="P@ssw0rd"
 SSH_PORT="2024"
 
-# DNS записи
+# DNS records
 declare -A DNS_A_RECORDS=(
     ["hq-rtr"]="192.168.0.62"
     ["hq-srv"]="192.168.0.1"
@@ -35,11 +35,17 @@ declare -A DNS_A_RECORDS=(
 )
 
 # =============================================================================
-echo "=== [1/7] Установка имени хоста ==="
+echo "=== [0/7] Installing required software ==="
+apt-get update -y
+apt-get install -y bind openssh-server
+echo "  Software installed"
+
+# =============================================================================
+echo "=== [1/7] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
 
 # =============================================================================
-echo "=== [2/7] Настройка IP-адреса ==="
+echo "=== [2/7] Configuring IP address ==="
 
 IF_DIR="/etc/net/ifaces/$IF_LAN"
 mkdir -p "$IF_DIR"
@@ -58,7 +64,7 @@ EOF
 echo "$IP_LAN" > "$IF_DIR/ipv4address"
 echo "default via $GW_LAN" > "$IF_DIR/ipv4route"
 
-# DNS-резолвер — указываем на себя
+# DNS resolver — point to self
 cat > /etc/resolv.conf <<EOF
 search $DOMAIN
 nameserver $DNS_SERVER_IP
@@ -70,50 +76,50 @@ sleep 2
 echo "  $IF_LAN -> $IP_LAN, gw $GW_LAN"
 
 # =============================================================================
-echo "=== [3/7] Создание пользователя $SSH_USER ==="
+echo "=== [3/7] Creating user $SSH_USER ==="
 
 if ! id "$SSH_USER" &>/dev/null; then
     adduser "$SSH_USER" -u "$SSH_USER_UID"
     echo "$SSH_USER:$SSH_USER_PASS" | chpasswd
     usermod -aG wheel "$SSH_USER"
     echo "$SSH_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-    echo "  Пользователь $SSH_USER (uid=$SSH_USER_UID) создан"
+    echo "  User $SSH_USER (uid=$SSH_USER_UID) created"
 else
-    echo "  Пользователь $SSH_USER уже существует"
+    echo "  User $SSH_USER already exists"
 fi
 
 # =============================================================================
-echo "=== [4/7] Настройка SSH ==="
+echo "=== [4/7] Configuring SSH ==="
 
 SSHD_CONFIG="/etc/openssh/sshd_config"
 
-# Порт
+# Port
 sed -i "s/^#\?Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
 
-# Разрешённые пользователи
+# Allowed users
 if ! grep -q "^AllowUsers" "$SSHD_CONFIG"; then
     echo "AllowUsers $SSH_USER" >> "$SSHD_CONFIG"
 else
     sed -i "s/^AllowUsers .*/AllowUsers $SSH_USER/" "$SSHD_CONFIG"
 fi
 
-# Максимум попыток аутентификации
+# Max authentication attempts
 sed -i 's/^#\?MaxAuthTries .*/MaxAuthTries 2/' "$SSHD_CONFIG"
 
-# Баннер
+# Banner
 sed -i 's|^#\?Banner .*|Banner /var/banner|' "$SSHD_CONFIG"
 
-# Создаём баннер
+# Create banner
 cat > /var/banner <<EOF
 Authorized access only
 EOF
 
 systemctl enable --now sshd
 systemctl restart sshd
-echo "  SSH: порт $SSH_PORT, пользователь $SSH_USER, баннер включён"
+echo "  SSH: port $SSH_PORT, user $SSH_USER, banner enabled"
 
 # =============================================================================
-echo "=== [5/7] Настройка DNS (BIND) ==="
+echo "=== [5/7] Configuring DNS (BIND) ==="
 
 # --- options.conf ---
 cat > /etc/bind/options.conf <<'OPTEOF'
@@ -148,11 +154,11 @@ OPTEOF
 sed -i "s/LISTEN_IP/$DNS_SERVER_IP/" /etc/bind/options.conf
 sed -i "s/FORWARDER_IP/$DNS_FORWARDER/" /etc/bind/options.conf
 
-# Создаём каталог для логов
+# Create log directory
 mkdir -p /var/log/bind
 chown named:named /var/log/bind
 
-# --- local.conf (объявление зон) ---
+# --- local.conf (zone declarations) ---
 cat > /etc/bind/local.conf <<EOF
 zone "$DOMAIN" {
     type master;
@@ -173,7 +179,7 @@ zone "1.168.192.in-addr.arpa" {
 };
 EOF
 
-# --- Прямая зона ---
+# --- Forward zone ---
 ZONE_DIR="/var/lib/bind/zones"
 mkdir -p "$ZONE_DIR"
 
@@ -189,13 +195,13 @@ cat > "$ZONE_DIR/$DOMAIN.db" <<EOF
 @       IN  NS  hq-srv.$DOMAIN.
 EOF
 
-# Добавляем A-записи
+# Add A records
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
     printf "%-16s IN  A   %s\n" "$host" "$ip" >> "$ZONE_DIR/$DOMAIN.db"
 done
 
-# --- Обратная зона 192.168.0.x ---
+# --- Reverse zone 192.168.0.x ---
 cat > "$ZONE_DIR/0.168.192.in-addr.arpa.db" <<EOF
 \$TTL 3600
 @   IN  SOA hq-srv.$DOMAIN. admin.$DOMAIN. (
@@ -208,17 +214,16 @@ cat > "$ZONE_DIR/0.168.192.in-addr.arpa.db" <<EOF
 @       IN  NS  hq-srv.$DOMAIN.
 EOF
 
-# PTR записи для 192.168.0.x
+# PTR records for 192.168.0.x
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
-    # Проверяем что это подсеть 192.168.0.x
     if [[ "$ip" == 192.168.0.* ]]; then
         last_octet="${ip##*.}"
         printf "%-8s IN  PTR %s.%s.\n" "$last_octet" "$host" "$DOMAIN" >> "$ZONE_DIR/0.168.192.in-addr.arpa.db"
     fi
 done
 
-# --- Обратная зона 192.168.1.x ---
+# --- Reverse zone 192.168.1.x ---
 cat > "$ZONE_DIR/1.168.192.in-addr.arpa.db" <<EOF
 \$TTL 3600
 @   IN  SOA hq-srv.$DOMAIN. admin.$DOMAIN. (
@@ -231,7 +236,7 @@ cat > "$ZONE_DIR/1.168.192.in-addr.arpa.db" <<EOF
 @       IN  NS  hq-srv.$DOMAIN.
 EOF
 
-# PTR записи для 192.168.1.x
+# PTR records for 192.168.1.x
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
     if [[ "$ip" == 192.168.1.* ]]; then
@@ -240,40 +245,40 @@ for host in "${!DNS_A_RECORDS[@]}"; do
     fi
 done
 
-# Права
+# Permissions
 chown -R named:named "$ZONE_DIR"
 chmod 600 "$ZONE_DIR"/*.db
 
-# Генерация rndc ключа
+# Generate rndc key
 rndc-confgen > /etc/bind/rndc.key 2>/dev/null || true
 sed -i '6,$d' /etc/bind/rndc.key 2>/dev/null || true
 
-# Проверка конфигурации
-echo "  Проверка конфигурации DNS..."
-named-checkconf || echo "  ВНИМАНИЕ: есть ошибки в конфигурации!"
-named-checkconf -z 2>&1 || echo "  ВНИМАНИЕ: есть ошибки в зонах!"
+# Check configuration
+echo "  Checking DNS configuration..."
+named-checkconf || echo "  WARNING: errors in configuration!"
+named-checkconf -z 2>&1 || echo "  WARNING: errors in zones!"
 
-# Запуск
+# Start
 systemctl enable --now bind
 systemctl restart bind
-echo "  DNS (BIND) настроен и запущен"
+echo "  DNS (BIND) configured and started"
 
 # =============================================================================
-echo "=== [6/7] Часовой пояс ==="
+echo "=== [6/7] Timezone ==="
 timedatectl set-timezone Europe/Moscow
 
 # =============================================================================
-echo "=== [7/7] Проверка ==="
+echo "=== [7/7] Verification ==="
 echo ""
 echo "--- IP ---"
 ip -c -br a
 echo ""
-echo "--- DNS тест ---"
+echo "--- DNS test ---"
 sleep 2
 for host in "${!DNS_A_RECORDS[@]}"; do
     echo -n "  $host.$DOMAIN -> "
-    nslookup "$host.$DOMAIN" 127.0.0.1 2>/dev/null | grep -A1 "Name:" | tail -1 || echo "ОШИБКА"
+    nslookup "$host.$DOMAIN" 127.0.0.1 2>/dev/null | grep -A1 "Name:" | tail -1 || echo "ERROR"
 done
 
 echo ""
-echo "=== HQ-SRV настроен ==="
+echo "=== HQ-SRV configured ==="
