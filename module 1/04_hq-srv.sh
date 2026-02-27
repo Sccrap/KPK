@@ -1,7 +1,13 @@
 #!/bin/bash
 ###############################################################################
 # 04_hq-srv.sh — HQ-SRV configuration (ALT Linux)
-# Module 1: IP, users, SSH, DNS (BIND), timezone
+# Module 1: hostname · user · SSH (port 2024) · DNS/BIND · timezone
+#
+# PRE-REQUISITE (manual, before running this script):
+#   ens19 = 192.168.0.1/26, gateway 192.168.0.62  (towards HQ-RTR vlan100)
+#   resolv.conf pointing to self:
+#     echo -e "search au-team.irpo\nnameserver 192.168.0.1\nnameserver 77.88.8.7" > /etc/resolv.conf
+#   See: module 1/README.md → "Step 0 — Manual IP Configuration"
 ###############################################################################
 set -e
 
@@ -9,22 +15,14 @@ set -e
 HOSTNAME="hq-srv.au-team.irpo"
 DOMAIN="au-team.irpo"
 
-# Network interface
-IF_LAN="ens19"
-IP_LAN="192.168.0.1/26"
-GW_LAN="192.168.0.62"
-
-# DNS
 DNS_SERVER_IP="192.168.0.1"
 DNS_FORWARDER="77.88.8.7"
 
-# SSH user
 SSH_USER="sshuser"
 SSH_USER_UID="2026"
 SSH_USER_PASS="P@ssw0rd"
 SSH_PORT="2024"
 
-# DNS records
 declare -A DNS_A_RECORDS=(
     ["hq-rtr"]="192.168.0.62"
     ["hq-srv"]="192.168.0.1"
@@ -35,48 +33,17 @@ declare -A DNS_A_RECORDS=(
 )
 
 # =============================================================================
-echo "=== [0/7] Installing required software ==="
+echo "=== [0/6] Installing required software ==="
 apt-get update -y
 apt-get install -y bind openssh-server
 echo "  Software installed"
 
 # =============================================================================
-echo "=== [1/7] Setting hostname ==="
+echo "=== [1/6] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
 
 # =============================================================================
-echo "=== [2/7] Configuring IP address ==="
-
-IF_DIR="/etc/net/ifaces/$IF_LAN"
-mkdir -p "$IF_DIR"
-
-cat > "$IF_DIR/options" <<EOF
-BOOTPROTO=static
-TYPE=eth
-CONFIG_WIRELESS=no
-SYSTEMD_BOOTPROTO=static
-CONFIG_IPV4=yes
-DISABLED=no
-NM_CONTROLLED=no
-ONBOOT=yes
-EOF
-
-echo "$IP_LAN" > "$IF_DIR/ipv4address"
-echo "default via $GW_LAN" > "$IF_DIR/ipv4route"
-
-# DNS resolver — point to self
-cat > /etc/resolv.conf <<EOF
-search $DOMAIN
-nameserver $DNS_SERVER_IP
-nameserver $DNS_FORWARDER
-EOF
-
-systemctl restart network
-sleep 2
-echo "  $IF_LAN -> $IP_LAN, gw $GW_LAN"
-
-# =============================================================================
-echo "=== [3/7] Creating user $SSH_USER ==="
+echo "=== [2/6] Creating user $SSH_USER ==="
 
 if ! id "$SSH_USER" &>/dev/null; then
     adduser "$SSH_USER" -u "$SSH_USER_UID"
@@ -89,27 +56,21 @@ else
 fi
 
 # =============================================================================
-echo "=== [4/7] Configuring SSH ==="
+echo "=== [3/6] Configuring SSH ==="
 
 SSHD_CONFIG="/etc/openssh/sshd_config"
 
-# Port
 sed -i "s/^#\?Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
 
-# Allowed users
 if ! grep -q "^AllowUsers" "$SSHD_CONFIG"; then
     echo "AllowUsers $SSH_USER" >> "$SSHD_CONFIG"
 else
     sed -i "s/^AllowUsers .*/AllowUsers $SSH_USER/" "$SSHD_CONFIG"
 fi
 
-# Max authentication attempts
 sed -i 's/^#\?MaxAuthTries .*/MaxAuthTries 2/' "$SSHD_CONFIG"
-
-# Banner
 sed -i 's|^#\?Banner .*|Banner /var/banner|' "$SSHD_CONFIG"
 
-# Create banner
 cat > /var/banner <<EOF
 Authorized access only
 EOF
@@ -119,7 +80,14 @@ systemctl restart sshd
 echo "  SSH: port $SSH_PORT, user $SSH_USER, banner enabled"
 
 # =============================================================================
-echo "=== [5/7] Configuring DNS (BIND) ==="
+echo "=== [4/6] Configuring DNS (BIND) ==="
+
+# Point resolver to self before starting bind
+cat > /etc/resolv.conf <<EOF
+search $DOMAIN
+nameserver $DNS_SERVER_IP
+nameserver $DNS_FORWARDER
+EOF
 
 # --- options.conf ---
 cat > /etc/bind/options.conf <<'OPTEOF'
@@ -154,11 +122,10 @@ OPTEOF
 sed -i "s/LISTEN_IP/$DNS_SERVER_IP/" /etc/bind/options.conf
 sed -i "s/FORWARDER_IP/$DNS_FORWARDER/" /etc/bind/options.conf
 
-# Create log directory
 mkdir -p /var/log/bind
 chown named:named /var/log/bind
 
-# --- local.conf (zone declarations) ---
+# --- local.conf ---
 cat > /etc/bind/local.conf <<EOF
 zone "$DOMAIN" {
     type master;
@@ -195,7 +162,6 @@ cat > "$ZONE_DIR/$DOMAIN.db" <<EOF
 @       IN  NS  hq-srv.$DOMAIN.
 EOF
 
-# Add A records
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
     printf "%-16s IN  A   %s\n" "$host" "$ip" >> "$ZONE_DIR/$DOMAIN.db"
@@ -214,12 +180,12 @@ cat > "$ZONE_DIR/0.168.192.in-addr.arpa.db" <<EOF
 @       IN  NS  hq-srv.$DOMAIN.
 EOF
 
-# PTR records for 192.168.0.x
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
     if [[ "$ip" == 192.168.0.* ]]; then
         last_octet="${ip##*.}"
-        printf "%-8s IN  PTR %s.%s.\n" "$last_octet" "$host" "$DOMAIN" >> "$ZONE_DIR/0.168.192.in-addr.arpa.db"
+        printf "%-8s IN  PTR %s.%s.\n" "$last_octet" "$host" "$DOMAIN" \
+            >> "$ZONE_DIR/0.168.192.in-addr.arpa.db"
     fi
 done
 
@@ -236,41 +202,35 @@ cat > "$ZONE_DIR/1.168.192.in-addr.arpa.db" <<EOF
 @       IN  NS  hq-srv.$DOMAIN.
 EOF
 
-# PTR records for 192.168.1.x
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
     if [[ "$ip" == 192.168.1.* ]]; then
         last_octet="${ip##*.}"
-        printf "%-8s IN  PTR %s.%s.\n" "$last_octet" "$host" "$DOMAIN" >> "$ZONE_DIR/1.168.192.in-addr.arpa.db"
+        printf "%-8s IN  PTR %s.%s.\n" "$last_octet" "$host" "$DOMAIN" \
+            >> "$ZONE_DIR/1.168.192.in-addr.arpa.db"
     fi
 done
 
-# Permissions
 chown -R named:named "$ZONE_DIR"
 chmod 600 "$ZONE_DIR"/*.db
 
-# Generate rndc key
 rndc-confgen > /etc/bind/rndc.key 2>/dev/null || true
 sed -i '6,$d' /etc/bind/rndc.key 2>/dev/null || true
 
-# Check configuration
 echo "  Checking DNS configuration..."
-named-checkconf || echo "  WARNING: errors in configuration!"
+named-checkconf     || echo "  WARNING: errors in configuration!"
 named-checkconf -z 2>&1 || echo "  WARNING: errors in zones!"
 
-# Start
 systemctl enable --now bind
 systemctl restart bind
 echo "  DNS (BIND) configured and started"
 
 # =============================================================================
-echo "=== [6/7] Timezone ==="
+echo "=== [5/6] Timezone ==="
 timedatectl set-timezone Europe/Moscow
 
 # =============================================================================
-echo "=== [7/7] Verification ==="
-echo ""
-echo "--- IP ---"
+echo "=== [6/6] Verification ==="
 ip -c -br a
 echo ""
 echo "--- DNS test ---"

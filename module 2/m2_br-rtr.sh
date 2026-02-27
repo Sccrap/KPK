@@ -1,28 +1,52 @@
 #!/bin/bash
 ###############################################################################
-# m2_12_br-rtr_port-forward.sh — DNAT на BR-RTR (ALT Linux, nftables)
-# Задание 8: Статическая трансляция портов
+# m2_br-rtr.sh — BR-RTR configuration (Module 2, ALT Linux)
+# Tasks: NTP client · Port forwarding (DNAT)
 ###############################################################################
 set -e
 
-# ======================== ПЕРЕМЕННЫЕ =========================================
+# ======================== VARIABLES ==========================================
+# NTP
+NTP_SERVER="172.16.1.14"
+
+# DNAT
 WAN_IP="172.16.2.1"
 BR_SRV_IP="192.168.1.1"
 IF_WAN="ens19"
-
-# Правила проброса
 DNAT_RULES=(
     "8080:$BR_SRV_IP:8080"
     "2024:$BR_SRV_IP:2024"
 )
-
 NFTABLES_CONF="/etc/nftables/nftables.nft"
 
 # =============================================================================
-echo "=== [1/2] Обновление nftables конфигурации ==="
+echo "=== [0/2] Installing required software ==="
+apt-get update -y
+apt-get install -y chrony
+echo "  Software installed"
+
+# =============================================================================
+echo "=== [1/2] Configuring NTP client ==="
+
+cat > /etc/chrony.conf <<EOF
+# NTP client — sync with ISP
+server $NTP_SERVER iburst prefer
+
+driftfile /var/lib/chrony/drift
+log tracking measurements statistics
+logdir /var/log/chrony
+EOF
+
+systemctl enable --now chronyd
+systemctl restart chronyd
+sleep 2
+echo "  NTP client: server $NTP_SERVER"
+
+# =============================================================================
+echo "=== [2/2] Configuring port forwarding (DNAT) ==="
 
 if grep -q "chain prerouting" "$NFTABLES_CONF" 2>/dev/null; then
-    echo "  chain prerouting уже существует — обновляем"
+    echo "  chain prerouting exists — replacing"
     sed -i '/chain prerouting/,/^[[:space:]]*}/d' "$NFTABLES_CONF"
 fi
 
@@ -54,18 +78,17 @@ with open("$NFTABLES_CONF", "w") as f:
     f.write(content_new)
 PYEOF
 else
-    echo "  ОШИБКА: table inet nat не найдена"
+    echo "  ERROR: table inet nat not found in $NFTABLES_CONF"
+    echo "  Add NAT table via module 1 script (03_br-rtr.sh) first"
     exit 1
 fi
 
-echo ""
-cat "$NFTABLES_CONF"
-
-# =============================================================================
-echo "=== [2/2] Перезапуск nftables ==="
-
 systemctl restart nftables
-nft list ruleset | grep -A5 "prerouting" || echo "  Правила не обнаружены"
 
 echo ""
-echo "=== Port forwarding на BR-RTR настроен ==="
+echo "=== Verification ==="
+chronyc sources 2>/dev/null | head -5
+echo ""
+nft list ruleset | grep -A3 "prerouting" || echo "  No prerouting rules found"
+echo ""
+echo "=== BR-RTR (Module 2) configured ==="
