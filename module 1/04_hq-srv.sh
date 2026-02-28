@@ -136,10 +136,21 @@ options {
 
     allow-query { any; };
     forwarders { $DNS_FORWARDER; };
+
+    # Отключаем IPv6 в резолвере — нет IPv6 connectivity
+    filter-aaaa-on-v4 yes;
+
     dnssec-validation yes;
     recursion yes;
 };
 OPTEOF
+
+# Отключаем IPv6 на уровне ОС для named
+if ! grep -q "OPTIONS" /etc/sysconfig/named 2>/dev/null; then
+    echo 'OPTIONS="-4"' >> /etc/sysconfig/named
+else
+    sed -i 's/^OPTIONS=.*/OPTIONS="-4"/' /etc/sysconfig/named
+fi
 chown named:named /etc/bind/options.conf
 chmod 640 /etc/bind/options.conf
 
