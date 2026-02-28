@@ -34,7 +34,12 @@ DUMP_FILE="$ISO_MOUNT/web/dump.sql"
 # =============================================================================
 echo "=== [0/4] Installing required software ==="
 apt-get update -y
-apt-get install -y chrony mdadm nfs-server mariadb-server httpd2 php
+# Определяем последнюю доступную версию PHP
+PHP_PKG=$(apt-cache search '^php[0-9]' 2>/dev/null | grep -oE '^php[0-9]+\.[0-9]+' | sort -V | tail -1)
+[ -z "$PHP_PKG" ] && PHP_PKG="php8.4"
+echo "  Using PHP: $PHP_PKG"
+
+apt-get install -y chrony mdadm nfs-server mariadb-server httpd2 "$PHP_PKG"
 echo "  Software installed"
 
 # =============================================================================
