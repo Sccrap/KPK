@@ -60,7 +60,7 @@ USER_PASS='P@$$word'
 # =============================================================================
 echo "=== [0/8] Installing required software ==="
 apt-get update -y
-apt-get install -y nftables openvswitch NetworkManager frr dhcp-server
+apt-get install -y nftables openvswitch frr dhcp-server
 echo "  Software installed"
 
 # =============================================================================
@@ -162,7 +162,6 @@ systemctl enable --now nftables
 echo "=== [4/8] Configuring VLANs via Open vSwitch ==="
 
 systemctl enable --now openvswitch
-systemctl enable --now NetworkManager
 sleep 2
 
 ovs-vsctl --if-exists del-br hq-sw
@@ -176,7 +175,6 @@ ovs-vsctl add-port hq-sw vlan200 tag=200 -- set interface vlan200 type=internal
 ovs-vsctl add-port hq-sw vlan999 tag=999 -- set interface vlan999 type=internal
 
 systemctl restart openvswitch
-systemctl restart NetworkManager
 sleep 2
 
 ip link set hq-sw up
@@ -221,22 +219,23 @@ fi
 # =============================================================================
 echo "=== [5/8] Configuring GRE tunnel ==="
 
-systemctl enable --now NetworkManager
-nmcli connection delete "$TUN_NAME" 2>/dev/null || true
+TUN_DIR="/etc/net/ifaces/$TUN_NAME"
+mkdir -p "$TUN_DIR"
 
-nmcli connection add type ip-tunnel \
-    ifname "$TUN_NAME" \
-    con-name "$TUN_NAME" \
-    mode gre \
-    remote "$TUN_REMOTE" \
-    local "$TUN_LOCAL" \
-    ip-tunnel.parent "$IF_WAN" \
-    ipv4.method manual \
-    ipv4.addresses "$TUN_IP" \
-    connection.autoconnect yes
+cat > "$TUN_DIR/options" <<EOF
+TYPE=iptun
+TUNTYPE=gre
+TUNLOCAL=$TUN_LOCAL
+TUNREMOTE=$TUN_REMOTE
+TUNOPTIONS='ttl 64'
+HOST=$IF_WAN
+EOF
 
-nmcli connection modify "$TUN_NAME" ip-tunnel.ttl 64
-nmcli connection up "$TUN_NAME"
+echo "$TUN_IP" > "$TUN_DIR/ipv4address"
+
+systemctl restart network
+sleep 2
+
 echo "  GRE: $TUN_LOCAL -> $TUN_REMOTE, IP: $TUN_IP"
 
 # =============================================================================
