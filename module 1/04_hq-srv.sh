@@ -15,6 +15,11 @@ set -e
 HOSTNAME="hq-srv.au-team.irpo"
 DOMAIN="au-team.irpo"
 
+# Network
+IF_LAN="ens19"
+IP_LAN="192.168.0.1/26"
+GW_LAN="192.168.0.62"
+
 DNS_SERVER_IP="192.168.0.1"
 DNS_FORWARDER="77.88.8.7"
 
@@ -41,6 +46,43 @@ echo "  Software installed"
 # =============================================================================
 echo "=== [1/6] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
+
+# =============================================================================
+echo "=== [1.5/6] Configuring interface IP address ==="
+
+configure_interface() {
+    local iface="$1"
+    local ip="$2"
+    local dir="/etc/net/ifaces/$iface"
+    mkdir -p "$dir"
+    if [ ! -f "$dir/options" ]; then
+        cat > "$dir/options" <<EOF
+BOOTPROTO=static
+TYPE=eth
+CONFIG_WIRELESS=no
+SYSTEMD_BOOTPROTO=static
+CONFIG_IPV4=yes
+DISABLED=no
+NM_CONTROLLED=no
+ONBOOT=yes
+EOF
+    else
+        sed -i 's/^BOOTPROTO=.*/BOOTPROTO=static/' "$dir/options"
+    fi
+    echo "$ip" > "$dir/ipv4address"
+    echo "  $iface -> $ip"
+}
+
+configure_interface "$IF_LAN" "$IP_LAN"
+echo "default via $GW_LAN" > "/etc/net/ifaces/$IF_LAN/ipv4route"
+echo "  $IF_LAN route -> default via $GW_LAN"
+
+# nameserver pointing to self
+echo -e "search $DOMAIN\nnameserver $DNS_SERVER_IP\nnameserver $DNS_FORWARDER" > /etc/resolv.conf
+
+systemctl restart network
+sleep 2
+echo "  Network restarted"
 
 # =============================================================================
 echo "=== [2/6] Creating user $SSH_USER ==="
@@ -81,13 +123,6 @@ echo "  SSH: port $SSH_PORT, user $SSH_USER, banner enabled"
 
 # =============================================================================
 echo "=== [4/6] Configuring DNS (BIND) ==="
-
-# Point resolver to self before starting bind
-cat > /etc/resolv.conf <<EOF
-search $DOMAIN
-nameserver $DNS_SERVER_IP
-nameserver $DNS_FORWARDER
-EOF
 
 # --- options.conf ---
 cat > /etc/bind/options.conf <<'OPTEOF'

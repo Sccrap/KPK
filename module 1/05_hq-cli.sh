@@ -11,12 +11,37 @@
 set -e
 
 HOSTNAME="hq-cli.au-team.irpo"
+IF_LAN="ens19"
 
 echo "=== [1/2] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
 echo "  Hostname: $HOSTNAME"
 
-echo "=== [2/2] Timezone ==="
+echo "=== [1.5/2] Configuring interface (DHCP) ==="
+
+DIR="/etc/net/ifaces/$IF_LAN"
+mkdir -p "$DIR"
+if [ ! -f "$DIR/options" ]; then
+    cat > "$DIR/options" <<EOF
+BOOTPROTO=dhcp
+TYPE=eth
+CONFIG_WIRELESS=no
+SYSTEMD_BOOTPROTO=dhcp
+CONFIG_IPV4=yes
+DISABLED=no
+NM_CONTROLLED=no
+ONBOOT=yes
+EOF
+else
+    sed -i 's/^BOOTPROTO=.*/BOOTPROTO=dhcp/' "$DIR/options"
+fi
+echo "  $IF_LAN -> DHCP"
+
+systemctl restart network
+sleep 3
+echo "  Network restarted"
+
+echo "=== [3/3] Timezone ==="
 timedatectl set-timezone Europe/Moscow
 
 echo ""

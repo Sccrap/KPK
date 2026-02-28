@@ -13,9 +13,15 @@ set -e
 # ======================== VARIABLES ==========================================
 HOSTNAME="br-rtr.au-team.irpo"
 
-# WAN interface (used for NAT and GRE source)
+# WAN interface (used for NAT and GRE source) — IP already set manually
 IF_WAN="ens19"
+IP_WAN="172.16.2.1/28"
+GW_WAN="172.16.2.14"
 TUN_LOCAL="172.16.2.1"
+
+# LAN interface towards BR-SRV
+IF_LAN="ens20"
+IP_LAN="192.168.1.30/27"
 
 # GRE tunnel
 TUN_NAME="tun1"
@@ -42,6 +48,44 @@ echo "  Software installed"
 # =============================================================================
 echo "=== [1/6] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
+
+# =============================================================================
+echo "=== [1.5/6] Configuring interface IP addresses ==="
+
+configure_interface() {
+    local iface="$1"
+    local ip="$2"
+    local dir="/etc/net/ifaces/$iface"
+    mkdir -p "$dir"
+    if [ ! -f "$dir/options" ]; then
+        cat > "$dir/options" <<EOF
+BOOTPROTO=static
+TYPE=eth
+CONFIG_WIRELESS=no
+SYSTEMD_BOOTPROTO=static
+CONFIG_IPV4=yes
+DISABLED=no
+NM_CONTROLLED=no
+ONBOOT=yes
+EOF
+    else
+        sed -i 's/^BOOTPROTO=.*/BOOTPROTO=static/' "$dir/options"
+    fi
+    echo "$ip" > "$dir/ipv4address"
+    echo "  $iface -> $ip"
+}
+
+# Configure WAN (ens19) — IP + default gateway
+configure_interface "$IF_WAN" "$IP_WAN"
+echo "default via $GW_WAN" > "/etc/net/ifaces/$IF_WAN/ipv4route"
+echo "  $IF_WAN route -> default via $GW_WAN"
+
+# Configure LAN (ens20) — towards BR-SRV
+configure_interface "$IF_LAN" "$IP_LAN"
+
+systemctl restart network
+sleep 2
+echo "  Network restarted"
 
 # =============================================================================
 echo "=== [2/6] Enabling IP forwarding ==="

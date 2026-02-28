@@ -14,6 +14,11 @@ set -e
 # ======================== VARIABLES ==========================================
 HOSTNAME="br-srv.au-team.irpo"
 
+# Network
+IF_LAN="ens19"
+IP_LAN="192.168.1.1/27"
+GW_LAN="192.168.1.30"
+
 SSH_USER="sshuser"
 SSH_USER_UID="2026"
 SSH_USER_PASS="P@ssw0rd"
@@ -28,6 +33,43 @@ echo "  Software installed"
 # =============================================================================
 echo "=== [1/4] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
+
+# =============================================================================
+echo "=== [1.5/4] Configuring interface IP address ==="
+
+configure_interface() {
+    local iface="$1"
+    local ip="$2"
+    local dir="/etc/net/ifaces/$iface"
+    mkdir -p "$dir"
+    if [ ! -f "$dir/options" ]; then
+        cat > "$dir/options" <<EOF
+BOOTPROTO=static
+TYPE=eth
+CONFIG_WIRELESS=no
+SYSTEMD_BOOTPROTO=static
+CONFIG_IPV4=yes
+DISABLED=no
+NM_CONTROLLED=no
+ONBOOT=yes
+EOF
+    else
+        sed -i 's/^BOOTPROTO=.*/BOOTPROTO=static/' "$dir/options"
+    fi
+    echo "$ip" > "$dir/ipv4address"
+    echo "  $iface -> $ip"
+}
+
+configure_interface "$IF_LAN" "$IP_LAN"
+echo "default via $GW_LAN" > "/etc/net/ifaces/$IF_LAN/ipv4route"
+echo "  $IF_LAN route -> default via $GW_LAN"
+
+# nameserver pointing to HQ-SRV
+echo -e "search au-team.irpo\nnameserver 192.168.0.1" > /etc/resolv.conf
+
+systemctl restart network
+sleep 2
+echo "  Network restarted"
 
 # =============================================================================
 echo "=== [2/4] Creating user $SSH_USER ==="

@@ -13,8 +13,10 @@ set -e
 # ======================== VARIABLES ==========================================
 HOSTNAME="hq-rtr.au-team.irpo"
 
-# WAN interface (used for NAT and GRE source)
+# WAN interface (used for NAT and GRE source) — IP already set manually
 IF_WAN="ens19"
+IP_WAN="172.16.1.1/28"
+GW_WAN="172.16.1.14"
 TUN_LOCAL="172.16.1.1"
 
 # OVS trunk ports
@@ -64,6 +66,58 @@ echo "  Software installed"
 # =============================================================================
 echo "=== [1/8] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
+
+# =============================================================================
+echo "=== [1.5/8] Configuring interface IP addresses ==="
+
+configure_interface() {
+    local iface="$1"
+    local ip="$2"
+    local dir="/etc/net/ifaces/$iface"
+    mkdir -p "$dir"
+    if [ ! -f "$dir/options" ]; then
+        cat > "$dir/options" <<EOF
+BOOTPROTO=static
+TYPE=eth
+CONFIG_WIRELESS=no
+SYSTEMD_BOOTPROTO=static
+CONFIG_IPV4=yes
+DISABLED=no
+NM_CONTROLLED=no
+ONBOOT=yes
+EOF
+    else
+        sed -i 's/^BOOTPROTO=.*/BOOTPROTO=static/' "$dir/options"
+    fi
+    echo "$ip" > "$dir/ipv4address"
+    echo "  $iface -> $ip"
+}
+
+# Configure WAN (ens19) — IP + default gateway
+configure_interface "$IF_WAN" "$IP_WAN"
+echo "default via $GW_WAN" > "/etc/net/ifaces/$IF_WAN/ipv4route"
+echo "  $IF_WAN route -> default via $GW_WAN"
+
+# Configure OVS trunk ports (no IP — used as tagged ports)
+for iface in "$IF_SRV" "$IF_CLI" "$IF_SW"; do
+    mkdir -p "/etc/net/ifaces/$iface"
+    if [ ! -f "/etc/net/ifaces/$iface/options" ]; then
+        cat > "/etc/net/ifaces/$iface/options" <<EOF
+BOOTPROTO=static
+TYPE=eth
+CONFIG_WIRELESS=no
+CONFIG_IPV4=no
+DISABLED=no
+NM_CONTROLLED=no
+ONBOOT=yes
+EOF
+    fi
+    echo "  $iface -> trunk port (no IP)"
+done
+
+systemctl restart network
+sleep 2
+echo "  Network restarted"
 
 # =============================================================================
 echo "=== [2/8] Enabling IP forwarding ==="
