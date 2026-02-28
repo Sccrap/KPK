@@ -125,65 +125,50 @@ echo "  SSH: port $SSH_PORT, user $SSH_USER, banner enabled"
 echo "=== [4/6] Configuring DNS (BIND) ==="
 
 # --- options.conf ---
-cat > /etc/bind/options.conf <<'OPTEOF'
+cat > /etc/bind/options.conf <<OPTEOF
 options {
-    directory "/var/lib/bind/zones";
-    dump-file "/var/lib/bind/cache_dump.db";
-    statistics-file "/var/lib/bind/named_stats.txt";
-    memstatistics-file "/var/lib/bind/named_mem_stats.txt";
+    directory "/etc/bind/zone";
 
-    listen-on port 53 { 127.0.0.1; LISTEN_IP; };
+    listen-on port 53 { 127.0.0.1; $DNS_SERVER_IP; };
     listen-on-v6 { none; };
 
     allow-query { any; };
 
-    forwarders { FORWARDER_IP; };
+    forwarders { $DNS_FORWARDER; };
 
     dnssec-validation yes;
 
     recursion yes;
 };
-
-logging {
-    channel default_log {
-        file "/var/log/bind/default.log" versions 3 size 5m;
-        severity dynamic;
-        print-time yes;
-    };
-    category default { default_log; };
-};
 OPTEOF
 
-sed -i "s/LISTEN_IP/$DNS_SERVER_IP/" /etc/bind/options.conf
-sed -i "s/FORWARDER_IP/$DNS_FORWARDER/" /etc/bind/options.conf
-
-mkdir -p /var/log/bind
-chown named:named /var/log/bind
+# Fix ownership so named can read options.conf
+chown named:named /etc/bind/options.conf
+chmod 640 /etc/bind/options.conf
 
 # --- local.conf ---
 cat > /etc/bind/local.conf <<EOF
 zone "$DOMAIN" {
     type master;
     file "$DOMAIN.db";
-    allow-update { none; };
 };
 
 zone "0.168.192.in-addr.arpa" {
     type master;
     file "0.168.192.in-addr.arpa.db";
-    allow-update { none; };
 };
 
 zone "1.168.192.in-addr.arpa" {
     type master;
     file "1.168.192.in-addr.arpa.db";
-    allow-update { none; };
 };
 EOF
 
 # --- Forward zone ---
-ZONE_DIR="/var/lib/bind/zones"
+ZONE_DIR="/etc/bind/zone"
 mkdir -p "$ZONE_DIR"
+chown named:named "$ZONE_DIR"
+chmod 750 "$ZONE_DIR"
 
 cat > "$ZONE_DIR/$DOMAIN.db" <<EOF
 \$TTL 3600
@@ -247,10 +232,12 @@ for host in "${!DNS_A_RECORDS[@]}"; do
 done
 
 chown -R named:named "$ZONE_DIR"
-chmod 600 "$ZONE_DIR"/*.db
+chmod 640 "$ZONE_DIR"/*.db
 
-rndc-confgen > /etc/bind/rndc.key 2>/dev/null || true
-sed -i '6,$d' /etc/bind/rndc.key 2>/dev/null || true
+# Comment out rndc include in named.conf if present (ALT Linux quirk)
+if grep -q "rndc.conf" /etc/bind/named.conf 2>/dev/null; then
+    sed -i 's|^include.*rndc.conf|//&|' /etc/bind/named.conf
+fi
 
 echo "  Checking DNS configuration..."
 named-checkconf     || echo "  WARNING: errors in configuration!"
