@@ -3,38 +3,27 @@
 # 02_hq-rtr.sh — HQ-RTR configuration (ALT Linux)
 # Module 1: hostname · forwarding · NAT · VLAN (OVS) · GRE · OSPF · DHCP · user
 #
-# PRE-REQUISITE (manual, before running this script):
-#   ens19 = 172.16.1.1/28, gateway 172.16.1.14  (WAN towards ISP)
-#   ens20, ens21, ens22 — no IP needed (used as OVS trunk ports)
-#   See: module 1/README.md → "Step 0 — Manual IP Configuration"
+# Интерфейсы определяются АВТОМАТИЧЕСКИ:
+#   WAN  — интерфейс с IP из сети 172.16.1.x (смотрит на ISP)
+#   LAN  — все остальные физические интерфейсы по порядку (для OVS/VLAN)
 ###############################################################################
 set -e
 
-# ======================== VARIABLES ==========================================
+# ======================== FIXED VARIABLES ====================================
 HOSTNAME="hq-rtr.au-team.irpo"
 
-# WAN interface (used for NAT and GRE source) — IP already set manually
-IF_WAN="ens19"
 IP_WAN="172.16.1.1/28"
 GW_WAN="172.16.1.14"
 TUN_LOCAL="172.16.1.1"
 
-# OVS trunk ports
-IF_SRV="ens20"    # VLAN 100 -> HQ-SRV
-IF_CLI="ens21"    # VLAN 200 -> HQ-CLI
-IF_SW="ens22"     # VLAN 999 -> HQ-SW (management)
-
-# VLAN gateway IPs
 IP_VLAN100="192.168.0.62/26"
 IP_VLAN200="192.168.0.78/28"
 IP_VLAN999="192.168.0.86/29"
 
-# GRE tunnel
 TUN_NAME="tun1"
 TUN_REMOTE="172.16.2.1"
 TUN_IP="10.5.5.1/30"
 
-# OSPF
 OSPF_PASS="P@ssw0rd"
 OSPF_NETWORKS=(
     "10.5.5.0/30"
@@ -43,7 +32,6 @@ OSPF_NETWORKS=(
     "192.168.0.80/29"
 )
 
-# DHCP server (for HQ-CLI on VLAN200)
 DHCP_IFACE="vlan200"
 DHCP_SUBNET="192.168.0.64"
 DHCP_NETMASK="255.255.255.240"
@@ -53,30 +41,65 @@ DHCP_ROUTER="192.168.0.78"
 DHCP_DNS="192.168.0.1"
 DHCP_DOMAIN="au-team.irpo"
 
-# Local user
 USER_NAME="net_admin"
 USER_PASS='P@$$word'
 
-# =============================================================================
-echo "=== [0/8] Installing required software ==="
-apt-get update -y
-apt-get install -y nftables openvswitch frr dhcp-server
-echo "  Software installed"
+# ======================== AUTO-DETECT INTERFACES =============================
+detect_interfaces() {
+    echo "  Scanning network interfaces..."
 
-# =============================================================================
-echo "=== [1/8] Setting hostname ==="
-hostnamectl set-hostname "$HOSTNAME"
+    # Все физические интерфейсы (не lo, не виртуальные), отсортированные по имени
+    ALL_IFACES=( $(ls /sys/class/net/ | grep -vE '^(lo|vlan|tun|gre|ovs|hq-sw|docker|br-)' | sort) )
 
-# =============================================================================
-echo "=== [1.5/8] Configuring interface IP addresses ==="
+    echo "  Found interfaces: ${ALL_IFACES[*]}"
 
-configure_interface() {
+    if [ ${#ALL_IFACES[@]} -lt 2 ]; then
+        echo "ERROR: need at least 2 interfaces, found: ${ALL_IFACES[*]}"
+        exit 1
+    fi
+
+    # WAN — ищем интерфейс у которого уже есть IP 172.16.1.x (базовая сеть)
+    IF_WAN=""
+    for iface in "${ALL_IFACES[@]}"; do
+        if ip addr show "$iface" 2>/dev/null | grep -qE "172\.16\.1\."; then
+            IF_WAN="$iface"
+            break
+        fi
+    done
+
+    # Если не нашли по IP — берём первый (WAN всегда первый по схеме)
+    if [ -z "$IF_WAN" ]; then
+        echo "  WARNING: no 172.16.1.x IP found, using first interface as WAN"
+        IF_WAN="${ALL_IFACES[0]}"
+    fi
+
+    # LAN — все кроме WAN, по порядку
+    LAN_IFACES=()
+    for iface in "${ALL_IFACES[@]}"; do
+        [ "$iface" != "$IF_WAN" ] && LAN_IFACES+=("$iface")
+    done
+
+    if [ ${#LAN_IFACES[@]} -lt 3 ]; then
+        echo "ERROR: need 3 LAN interfaces for VLANs, found ${#LAN_IFACES[@]}: ${LAN_IFACES[*]}"
+        exit 1
+    fi
+
+    IF_SRV="${LAN_IFACES[0]}"   # VLAN100 -> HQ-SRV
+    IF_CLI="${LAN_IFACES[1]}"   # VLAN200 -> HQ-CLI
+    IF_SW="${LAN_IFACES[2]}"    # VLAN999 -> management
+
+    echo "  WAN (to ISP)   : $IF_WAN"
+    echo "  SRV (VLAN100)  : $IF_SRV"
+    echo "  CLI (VLAN200)  : $IF_CLI"
+    echo "  SW  (VLAN999)  : $IF_SW"
+}
+
+configure_iface_static() {
     local iface="$1"
     local ip="$2"
     local dir="/etc/net/ifaces/$iface"
     mkdir -p "$dir"
-    if [ ! -f "$dir/options" ]; then
-        cat > "$dir/options" <<EOF
+    cat > "$dir/options" <<OPTS
 BOOTPROTO=static
 TYPE=eth
 CONFIG_WIRELESS=no
@@ -85,24 +108,16 @@ CONFIG_IPV4=yes
 DISABLED=no
 NM_CONTROLLED=no
 ONBOOT=yes
-EOF
-    else
-        sed -i 's/^BOOTPROTO=.*/BOOTPROTO=static/' "$dir/options"
-    fi
+OPTS
     echo "$ip" > "$dir/ipv4address"
     echo "  $iface -> $ip"
 }
 
-# Configure WAN (ens19) — IP + default gateway
-configure_interface "$IF_WAN" "$IP_WAN"
-echo "default via $GW_WAN" > "/etc/net/ifaces/$IF_WAN/ipv4route"
-echo "  $IF_WAN route -> default via $GW_WAN"
-
-# Configure OVS trunk ports (no IP — used as tagged ports)
-for iface in "$IF_SRV" "$IF_CLI" "$IF_SW"; do
-    mkdir -p "/etc/net/ifaces/$iface"
-    if [ ! -f "/etc/net/ifaces/$iface/options" ]; then
-        cat > "/etc/net/ifaces/$iface/options" <<EOF
+configure_iface_trunk() {
+    local iface="$1"
+    local dir="/etc/net/ifaces/$iface"
+    mkdir -p "$dir"
+    cat > "$dir/options" <<OPTS
 BOOTPROTO=static
 TYPE=eth
 CONFIG_WIRELESS=no
@@ -110,10 +125,30 @@ CONFIG_IPV4=no
 DISABLED=no
 NM_CONTROLLED=no
 ONBOOT=yes
-EOF
-    fi
-    echo "  $iface -> trunk port (no IP)"
-done
+OPTS
+    echo "  $iface -> trunk (no IP)"
+}
+
+# =============================================================================
+echo "=== [0/8] Installing required software ==="
+apt-get update -y
+apt-get install -y nftables openvswitch frr dhcp-server
+echo "  Done"
+
+# =============================================================================
+echo "=== [1/8] Setting hostname ==="
+hostnamectl set-hostname "$HOSTNAME"
+
+# =============================================================================
+echo "=== [1.5/8] Auto-detecting and configuring interfaces ==="
+detect_interfaces
+
+configure_iface_static "$IF_WAN" "$IP_WAN"
+echo "default via $GW_WAN" > "/etc/net/ifaces/$IF_WAN/ipv4route"
+
+configure_iface_trunk "$IF_SRV"
+configure_iface_trunk "$IF_CLI"
+configure_iface_trunk "$IF_SW"
 
 systemctl restart network
 sleep 2
@@ -121,7 +156,6 @@ echo "  Network restarted"
 
 # =============================================================================
 echo "=== [2/8] Enabling IP forwarding ==="
-
 SYSCTL_FILE="/etc/net/sysctl.conf"
 if grep -q "^net.ipv4.ip_forward" "$SYSCTL_FILE"; then
     sed -i 's/^net.ipv4.ip_forward.*/net.ipv4.ip_forward = 1/' "$SYSCTL_FILE"
@@ -132,18 +166,12 @@ sysctl -w net.ipv4.ip_forward=1
 
 # =============================================================================
 echo "=== [3/8] Configuring NAT (nftables) ==="
-
 NFTABLES_CONF="/etc/nftables/nftables.nft"
 mkdir -p /etc/nftables
-if [ ! -f "$NFTABLES_CONF" ]; then
-    cat > "$NFTABLES_CONF" <<EOF
-#!/usr/sbin/nft -f
-flush ruleset
-EOF
-fi
+[ ! -f "$NFTABLES_CONF" ] && printf '#!/usr/sbin/nft -f\nflush ruleset\n' > "$NFTABLES_CONF"
 
-if ! grep -q "table inet nat" "$NFTABLES_CONF" 2>/dev/null; then
-    cat >> "$NFTABLES_CONF" <<EOF
+if ! grep -q "table inet nat" "$NFTABLES_CONF"; then
+    cat >> "$NFTABLES_CONF" <<NFTEOF
 
 table inet nat {
     chain postrouting {
@@ -151,16 +179,12 @@ table inet nat {
         oifname "$IF_WAN" masquerade
     }
 }
-EOF
-    echo "  NAT added (masquerade via $IF_WAN)"
-else
-    echo "  NAT already configured"
+NFTEOF
 fi
 systemctl enable --now nftables
 
 # =============================================================================
 echo "=== [4/8] Configuring VLANs via Open vSwitch ==="
-
 systemctl enable --now openvswitch
 sleep 2
 
@@ -169,7 +193,6 @@ ovs-vsctl add-br hq-sw
 ovs-vsctl add-port hq-sw "$IF_SRV" tag=100
 ovs-vsctl add-port hq-sw "$IF_CLI" tag=200
 ovs-vsctl add-port hq-sw "$IF_SW"  tag=999
-
 ovs-vsctl add-port hq-sw vlan100 tag=100 -- set interface vlan100 type=internal
 ovs-vsctl add-port hq-sw vlan200 tag=200 -- set interface vlan200 type=internal
 ovs-vsctl add-port hq-sw vlan999 tag=999 -- set interface vlan999 type=internal
@@ -178,74 +201,51 @@ systemctl restart openvswitch
 sleep 2
 
 ip link set hq-sw up
-
 ip addr flush dev vlan100 2>/dev/null || true
 ip addr flush dev vlan200 2>/dev/null || true
 ip addr flush dev vlan999 2>/dev/null || true
-
 ip addr add $IP_VLAN100 dev vlan100
 ip addr add $IP_VLAN200 dev vlan200
 ip addr add $IP_VLAN999 dev vlan999
-
 ip link set vlan100 up
 ip link set vlan200 up
 ip link set vlan999 up
 
-echo "  VLAN100: $IP_VLAN100"
-echo "  VLAN200: $IP_VLAN200"
-echo "  VLAN999: $IP_VLAN999"
+echo "  VLAN100: $IP_VLAN100  VLAN200: $IP_VLAN200  VLAN999: $IP_VLAN999"
 
-# Restore VLAN IPs on login (OVS does not persist them across reboots)
-cat > /root/ip.sh <<SCRIPT
+# vlan.sh — восстановление IP после перезагрузки (OVS не сохраняет IP)
+cat > /root/vlan.sh << 'VSCRIPT'
 #!/bin/bash
-ip link set hq-sw up 2>/dev/null
-sleep 1
-ip addr flush dev vlan100 2>/dev/null
-ip addr flush dev vlan200 2>/dev/null
-ip addr flush dev vlan999 2>/dev/null
-ip addr add $IP_VLAN100 dev vlan100
-ip addr add $IP_VLAN200 dev vlan200
-ip addr add $IP_VLAN999 dev vlan999
-ip link set vlan100 up
-ip link set vlan200 up
-ip link set vlan999 up
-SCRIPT
-chmod +x /root/ip.sh
-
-if ! grep -q "ip.sh" /root/.bashrc 2>/dev/null; then
-    echo "bash /root/ip.sh 2>/dev/null" >> /root/.bashrc
-fi
+ip a add 192.168.0.62/26 dev vlan100 2>/dev/null || true
+ip a add 192.168.0.78/28 dev vlan200 2>/dev/null || true
+ip a add 192.168.0.86/29 dev vlan999 2>/dev/null || true
+systemctl restart dhcpd
+VSCRIPT
+chmod +x /root/vlan.sh
+grep -q "vlan.sh" /root/.bashrc 2>/dev/null || echo "bash /root/vlan.sh 2>/dev/null" >> /root/.bashrc
 
 # =============================================================================
 echo "=== [5/8] Configuring GRE tunnel ==="
-
 TUN_DIR="/etc/net/ifaces/$TUN_NAME"
 mkdir -p "$TUN_DIR"
-
-cat > "$TUN_DIR/options" <<EOF
+cat > "$TUN_DIR/options" <<TUNEOF
 TYPE=iptun
 TUNTYPE=gre
 TUNLOCAL=$TUN_LOCAL
 TUNREMOTE=$TUN_REMOTE
 TUNOPTIONS='ttl 64'
 HOST=$IF_WAN
-EOF
-
+TUNEOF
 echo "$TUN_IP" > "$TUN_DIR/ipv4address"
 
 systemctl restart network
 sleep 2
-
-echo "  GRE: $TUN_LOCAL -> $TUN_REMOTE, IP: $TUN_IP"
+echo "  GRE: $TUN_LOCAL -> $TUN_REMOTE ($TUN_IP)"
 
 # =============================================================================
 echo "=== [6/8] Configuring OSPF (FRR) ==="
-
 FRR_DAEMONS="/etc/frr/daemons"
-if [ -f "$FRR_DAEMONS" ]; then
-    sed -i 's/^ospfd=no/ospfd=yes/' "$FRR_DAEMONS"
-fi
-
+[ -f "$FRR_DAEMONS" ] && sed -i 's/^ospfd=no/ospfd=yes/' "$FRR_DAEMONS"
 systemctl enable --now frr
 sleep 2
 
@@ -264,12 +264,10 @@ exit
 exit
 write memory
 VTYSH_EOF
-
 echo "  OSPF configured"
 
 # =============================================================================
-echo "=== [7/8] Configuring DHCP server (HQ-CLI via VLAN200) ==="
-
+echo "=== [7/8] Configuring DHCP ==="
 DHCPD_SYSCONFIG="/etc/sysconfig/dhcpd"
 if [ -f "$DHCPD_SYSCONFIG" ]; then
     sed -i "s/^DHCPDARGS=.*/DHCPDARGS=$DHCP_IFACE/" "$DHCPD_SYSCONFIG"
@@ -277,10 +275,8 @@ else
     echo "DHCPDARGS=$DHCP_IFACE" > "$DHCPD_SYSCONFIG"
 fi
 
-cat > /etc/dhcp/dhcpd.conf <<EOF
-# DHCP for HQ-CLI (VLAN200)
+cat > /etc/dhcp/dhcpd.conf <<DHCPEOF
 authoritative;
-
 subnet $DHCP_SUBNET netmask $DHCP_NETMASK {
     range $DHCP_RANGE_START $DHCP_RANGE_END;
     option domain-name-servers $DHCP_DNS;
@@ -289,31 +285,23 @@ subnet $DHCP_SUBNET netmask $DHCP_NETMASK {
     default-lease-time 6000;
     max-lease-time 7200;
 }
-EOF
-
+DHCPEOF
 systemctl enable --now dhcpd
-echo "  DHCP: pool $DHCP_RANGE_START - $DHCP_RANGE_END"
 
 # =============================================================================
 echo "=== [8/8] Creating user ==="
-
 if ! id "$USER_NAME" &>/dev/null; then
     adduser "$USER_NAME"
     echo "$USER_NAME:$USER_PASS" | chpasswd
     usermod -aG wheel "$USER_NAME"
     echo "$USER_NAME ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
-    echo "  User $USER_NAME created"
-else
-    echo "  User $USER_NAME already exists"
 fi
-
 timedatectl set-timezone Europe/Moscow
 
 echo ""
 echo "=== Verification ==="
+echo "  WAN=$IF_WAN  SRV=$IF_SRV  CLI=$IF_CLI  SW=$IF_SW"
 ip -c -br a
 echo "---"
 ovs-vsctl show
-echo ""
 echo "=== HQ-RTR configured ==="
-echo "!!! After configuring BR-RTR, both routers may need a reboot !!!"

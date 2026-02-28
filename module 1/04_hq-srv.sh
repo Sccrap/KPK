@@ -1,25 +1,19 @@
 #!/bin/bash
 ###############################################################################
 # 04_hq-srv.sh — HQ-SRV configuration (ALT Linux)
-# Module 1: hostname · user · SSH (port 2024) · DNS/BIND · timezone
+# Module 1: hostname · user · SSH · DNS/BIND · timezone
 #
-# PRE-REQUISITE (manual, before running this script):
-#   ens19 = 192.168.0.1/26, gateway 192.168.0.62  (towards HQ-RTR vlan100)
-#   resolv.conf pointing to self:
-#     echo -e "search au-team.irpo\nnameserver 192.168.0.1\nnameserver 77.88.8.7" > /etc/resolv.conf
-#   See: module 1/README.md → "Step 0 — Manual IP Configuration"
+# Интерфейс определяется АВТОМАТИЧЕСКИ:
+#   LAN — единственный физический интерфейс (или с IP 192.168.x.x)
 ###############################################################################
 set -e
 
-# ======================== VARIABLES ==========================================
+# ======================== FIXED VARIABLES ====================================
 HOSTNAME="hq-srv.au-team.irpo"
 DOMAIN="au-team.irpo"
 
-# Network
-IF_LAN="ens19"
 IP_LAN="192.168.0.1/26"
 GW_LAN="192.168.0.62"
-
 DNS_SERVER_IP="192.168.0.1"
 DNS_FORWARDER="77.88.8.7"
 
@@ -37,26 +31,37 @@ declare -A DNS_A_RECORDS=(
     ["br-srv"]="192.168.1.1"
 )
 
-# =============================================================================
-echo "=== [0/6] Installing required software ==="
-apt-get update -y
-apt-get install -y bind openssh-server
-echo "  Software installed"
+# ======================== AUTO-DETECT INTERFACE ==============================
+detect_interface() {
+    echo "  Scanning network interfaces..."
 
-# =============================================================================
-echo "=== [1/6] Setting hostname ==="
-hostnamectl set-hostname "$HOSTNAME"
+    ALL_IFACES=( $(ls /sys/class/net/ | grep -vE '^(lo|vlan|tun|gre|ovs|docker|br-)' | sort) )
+    echo "  Found interfaces: ${ALL_IFACES[*]}"
 
-# =============================================================================
-echo "=== [1.5/6] Configuring interface IP address ==="
+    # Ищем интерфейс с IP из 192.168.x.x (базовая сеть уже настроена)
+    IF_LAN=""
+    for iface in "${ALL_IFACES[@]}"; do
+        if ip addr show "$iface" 2>/dev/null | grep -qE "192\.168\."; then
+            IF_LAN="$iface"
+            break
+        fi
+    done
 
-configure_interface() {
+    # Если не нашли — берём первый физический интерфейс
+    if [ -z "$IF_LAN" ]; then
+        echo "  WARNING: no 192.168.x.x IP found, using first interface"
+        IF_LAN="${ALL_IFACES[0]}"
+    fi
+
+    echo "  LAN (to HQ-RTR): $IF_LAN"
+}
+
+configure_iface_static() {
     local iface="$1"
     local ip="$2"
     local dir="/etc/net/ifaces/$iface"
     mkdir -p "$dir"
-    if [ ! -f "$dir/options" ]; then
-        cat > "$dir/options" <<EOF
+    cat > "$dir/options" <<OPTS
 BOOTPROTO=static
 TYPE=eth
 CONFIG_WIRELESS=no
@@ -65,19 +70,28 @@ CONFIG_IPV4=yes
 DISABLED=no
 NM_CONTROLLED=no
 ONBOOT=yes
-EOF
-    else
-        sed -i 's/^BOOTPROTO=.*/BOOTPROTO=static/' "$dir/options"
-    fi
+OPTS
     echo "$ip" > "$dir/ipv4address"
     echo "  $iface -> $ip"
 }
 
-configure_interface "$IF_LAN" "$IP_LAN"
-echo "default via $GW_LAN" > "/etc/net/ifaces/$IF_LAN/ipv4route"
-echo "  $IF_LAN route -> default via $GW_LAN"
+# =============================================================================
+echo "=== [0/6] Installing required software ==="
+apt-get update -y
+apt-get install -y bind openssh-server
+echo "  Done"
 
-# nameserver pointing to self
+# =============================================================================
+echo "=== [1/6] Setting hostname ==="
+hostnamectl set-hostname "$HOSTNAME"
+
+# =============================================================================
+echo "=== [1.5/6] Auto-detecting and configuring interface ==="
+detect_interface
+
+configure_iface_static "$IF_LAN" "$IP_LAN"
+echo "default via $GW_LAN" > "/etc/net/ifaces/$IF_LAN/ipv4route"
+
 echo -e "search $DOMAIN\nnameserver $DNS_SERVER_IP\nnameserver $DNS_FORWARDER" > /etc/resolv.conf
 
 systemctl restart network
@@ -86,7 +100,6 @@ echo "  Network restarted"
 
 # =============================================================================
 echo "=== [2/6] Creating user $SSH_USER ==="
-
 if ! id "$SSH_USER" &>/dev/null; then
     adduser "$SSH_USER" -u "$SSH_USER_UID"
     echo "$SSH_USER:$SSH_USER_PASS" | chpasswd
@@ -99,32 +112,21 @@ fi
 
 # =============================================================================
 echo "=== [3/6] Configuring SSH ==="
-
 SSHD_CONFIG="/etc/openssh/sshd_config"
-
 sed -i "s/^#\?Port .*/Port $SSH_PORT/" "$SSHD_CONFIG"
-
-if ! grep -q "^AllowUsers" "$SSHD_CONFIG"; then
-    echo "AllowUsers $SSH_USER" >> "$SSHD_CONFIG"
-else
-    sed -i "s/^AllowUsers .*/AllowUsers $SSH_USER/" "$SSHD_CONFIG"
-fi
-
+grep -q "^AllowUsers" "$SSHD_CONFIG" \
+    && sed -i "s/^AllowUsers .*/AllowUsers $SSH_USER/" "$SSHD_CONFIG" \
+    || echo "AllowUsers $SSH_USER" >> "$SSHD_CONFIG"
 sed -i 's/^#\?MaxAuthTries .*/MaxAuthTries 2/' "$SSHD_CONFIG"
 sed -i 's|^#\?Banner .*|Banner /var/banner|' "$SSHD_CONFIG"
-
-cat > /var/banner <<EOF
-Authorized access only
-EOF
-
+echo "Authorized access only" > /var/banner
 systemctl enable --now sshd
 systemctl restart sshd
-echo "  SSH: port $SSH_PORT, user $SSH_USER, banner enabled"
+echo "  SSH port=$SSH_PORT user=$SSH_USER"
 
 # =============================================================================
 echo "=== [4/6] Configuring DNS (BIND) ==="
 
-# --- options.conf ---
 cat > /etc/bind/options.conf <<OPTEOF
 options {
     directory "/etc/bind/zone";
@@ -133,21 +135,15 @@ options {
     listen-on-v6 { none; };
 
     allow-query { any; };
-
     forwarders { $DNS_FORWARDER; };
-
     dnssec-validation yes;
-
     recursion yes;
 };
 OPTEOF
-
-# Fix ownership so named can read options.conf
 chown named:named /etc/bind/options.conf
 chmod 640 /etc/bind/options.conf
 
-# --- local.conf ---
-cat > /etc/bind/local.conf <<EOF
+cat > /etc/bind/local.conf <<LOCALEOF
 zone "$DOMAIN" {
     type master;
     file "$DOMAIN.db";
@@ -162,90 +158,74 @@ zone "1.168.192.in-addr.arpa" {
     type master;
     file "1.168.192.in-addr.arpa.db";
 };
-EOF
+LOCALEOF
 
-# --- Forward zone ---
 ZONE_DIR="/etc/bind/zone"
 mkdir -p "$ZONE_DIR"
 chown named:named "$ZONE_DIR"
 chmod 750 "$ZONE_DIR"
 
-cat > "$ZONE_DIR/$DOMAIN.db" <<EOF
+# Forward zone
+cat > "$ZONE_DIR/$DOMAIN.db" <<ZEOF
 \$TTL 3600
 @   IN  SOA hq-srv.$DOMAIN. admin.$DOMAIN. (
         $(date +%Y%m%d)01 ; Serial
-        3600       ; Refresh
-        900        ; Retry
-        604800     ; Expire
-        86400 )    ; Minimum TTL
-
+        3600    ; Refresh
+        900     ; Retry
+        604800  ; Expire
+        86400 ) ; Minimum TTL
 @       IN  NS  hq-srv.$DOMAIN.
-EOF
-
+ZEOF
 for host in "${!DNS_A_RECORDS[@]}"; do
-    ip="${DNS_A_RECORDS[$host]}"
-    printf "%-16s IN  A   %s\n" "$host" "$ip" >> "$ZONE_DIR/$DOMAIN.db"
+    printf "%-16s IN  A   %s\n" "$host" "${DNS_A_RECORDS[$host]}" >> "$ZONE_DIR/$DOMAIN.db"
 done
 
-# --- Reverse zone 192.168.0.x ---
-cat > "$ZONE_DIR/0.168.192.in-addr.arpa.db" <<EOF
+# Reverse zone 192.168.0.x
+cat > "$ZONE_DIR/0.168.192.in-addr.arpa.db" <<ZEOF
 \$TTL 3600
 @   IN  SOA hq-srv.$DOMAIN. admin.$DOMAIN. (
         $(date +%Y%m%d)01 ; Serial
-        3600       ; Refresh
-        900        ; Retry
-        604800     ; Expire
-        86400 )    ; Minimum TTL
-
+        3600    ; Refresh
+        900     ; Retry
+        604800  ; Expire
+        86400 ) ; Minimum TTL
 @       IN  NS  hq-srv.$DOMAIN.
-EOF
-
+ZEOF
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
-    if [[ "$ip" == 192.168.0.* ]]; then
-        last_octet="${ip##*.}"
-        printf "%-8s IN  PTR %s.%s.\n" "$last_octet" "$host" "$DOMAIN" \
-            >> "$ZONE_DIR/0.168.192.in-addr.arpa.db"
-    fi
+    [[ "$ip" == 192.168.0.* ]] && printf "%-8s IN  PTR %s.%s.\n" "${ip##*.}" "$host" "$DOMAIN" \
+        >> "$ZONE_DIR/0.168.192.in-addr.arpa.db"
 done
 
-# --- Reverse zone 192.168.1.x ---
-cat > "$ZONE_DIR/1.168.192.in-addr.arpa.db" <<EOF
+# Reverse zone 192.168.1.x
+cat > "$ZONE_DIR/1.168.192.in-addr.arpa.db" <<ZEOF
 \$TTL 3600
 @   IN  SOA hq-srv.$DOMAIN. admin.$DOMAIN. (
         $(date +%Y%m%d)01 ; Serial
-        3600       ; Refresh
-        900        ; Retry
-        604800     ; Expire
-        86400 )    ; Minimum TTL
-
+        3600    ; Refresh
+        900     ; Retry
+        604800  ; Expire
+        86400 ) ; Minimum TTL
 @       IN  NS  hq-srv.$DOMAIN.
-EOF
-
+ZEOF
 for host in "${!DNS_A_RECORDS[@]}"; do
     ip="${DNS_A_RECORDS[$host]}"
-    if [[ "$ip" == 192.168.1.* ]]; then
-        last_octet="${ip##*.}"
-        printf "%-8s IN  PTR %s.%s.\n" "$last_octet" "$host" "$DOMAIN" \
-            >> "$ZONE_DIR/1.168.192.in-addr.arpa.db"
-    fi
+    [[ "$ip" == 192.168.1.* ]] && printf "%-8s IN  PTR %s.%s.\n" "${ip##*.}" "$host" "$DOMAIN" \
+        >> "$ZONE_DIR/1.168.192.in-addr.arpa.db"
 done
 
 chown -R named:named "$ZONE_DIR"
 chmod 640 "$ZONE_DIR"/*.db
 
-# Comment out rndc include in named.conf if present (ALT Linux quirk)
-if grep -q "rndc.conf" /etc/bind/named.conf 2>/dev/null; then
-    sed -i 's|^include.*rndc.conf|//&|' /etc/bind/named.conf
-fi
+# Комментируем rndc.conf (ALT Linux quirk)
+grep -q "rndc.conf" /etc/bind/named.conf 2>/dev/null \
+    && sed -i 's|^include.*rndc.conf|//&|' /etc/bind/named.conf
 
-echo "  Checking DNS configuration..."
-named-checkconf     || echo "  WARNING: errors in configuration!"
-named-checkconf -z 2>&1 || echo "  WARNING: errors in zones!"
-
+named-checkconf    || echo "  WARNING: config errors!"
+named-checkconf -z || echo "  WARNING: zone errors!"
 systemctl enable --now bind
 systemctl restart bind
-echo "  DNS (BIND) configured and started"
+echo "  DNS configured"
 
 # =============================================================================
 echo "=== [5/6] Timezone ==="
@@ -253,14 +233,13 @@ timedatectl set-timezone Europe/Moscow
 
 # =============================================================================
 echo "=== [6/6] Verification ==="
+echo "  LAN=$IF_LAN"
 ip -c -br a
 echo ""
 echo "--- DNS test ---"
 sleep 2
 for host in "${!DNS_A_RECORDS[@]}"; do
     echo -n "  $host.$DOMAIN -> "
-    nslookup "$host.$DOMAIN" 127.0.0.1 2>/dev/null | grep -A1 "Name:" | tail -1 || echo "ERROR"
+    nslookup "$host.$DOMAIN" 127.0.0.1 2>/dev/null | grep "Address:" | tail -1 || echo "ERROR"
 done
-
-echo ""
 echo "=== HQ-SRV configured ==="

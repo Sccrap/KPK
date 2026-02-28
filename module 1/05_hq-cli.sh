@@ -1,28 +1,41 @@
 #!/bin/bash
 ###############################################################################
 # 05_hq-cli.sh — HQ-CLI configuration (ALT Linux)
-# Module 1: hostname · timezone
+# Module 1: hostname · timezone · DHCP на интерфейсе
 #
-# PRE-REQUISITE (manual, before running this script):
-#   ens19 — DHCP client (gets IP from HQ-RTR DHCP, pool 192.168.0.65-75)
-#   HQ-RTR must already be configured and running (script 02_hq-rtr.sh)
-#   See: module 1/README.md → "Step 0 — Manual IP Configuration"
+# Интерфейс определяется АВТОМАТИЧЕСКИ — первый физический интерфейс
 ###############################################################################
 set -e
 
 HOSTNAME="hq-cli.au-team.irpo"
-IF_LAN="ens19"
 
-echo "=== [1/2] Setting hostname ==="
+# ======================== AUTO-DETECT INTERFACE ==============================
+detect_interface() {
+    echo "  Scanning network interfaces..."
+    ALL_IFACES=( $(ls /sys/class/net/ | grep -vE '^(lo|vlan|tun|gre|ovs|docker|br-)' | sort) )
+    echo "  Found interfaces: ${ALL_IFACES[*]}"
+
+    if [ ${#ALL_IFACES[@]} -lt 1 ]; then
+        echo "ERROR: no network interfaces found"
+        exit 1
+    fi
+
+    # Берём первый физический интерфейс
+    IF_LAN="${ALL_IFACES[0]}"
+    echo "  LAN (DHCP): $IF_LAN"
+}
+
+# =============================================================================
+echo "=== [1/3] Setting hostname ==="
 hostnamectl set-hostname "$HOSTNAME"
-echo "  Hostname: $HOSTNAME"
 
-echo "=== [1.5/2] Configuring interface (DHCP) ==="
+# =============================================================================
+echo "=== [2/3] Auto-detecting and configuring interface (DHCP) ==="
+detect_interface
 
 DIR="/etc/net/ifaces/$IF_LAN"
 mkdir -p "$DIR"
-if [ ! -f "$DIR/options" ]; then
-    cat > "$DIR/options" <<EOF
+cat > "$DIR/options" <<OPTS
 BOOTPROTO=dhcp
 TYPE=eth
 CONFIG_WIRELESS=no
@@ -31,23 +44,21 @@ CONFIG_IPV4=yes
 DISABLED=no
 NM_CONTROLLED=no
 ONBOOT=yes
-EOF
-else
-    sed -i 's/^BOOTPROTO=.*/BOOTPROTO=dhcp/' "$DIR/options"
-fi
+OPTS
 echo "  $IF_LAN -> DHCP"
 
 systemctl restart network
 sleep 3
 echo "  Network restarted"
 
+# =============================================================================
 echo "=== [3/3] Timezone ==="
 timedatectl set-timezone Europe/Moscow
 
 echo ""
 echo "=== Verification ==="
+echo "  LAN=$IF_LAN"
 ip -c -br a
 echo "---"
 ip -c -br r
-echo ""
 echo "=== HQ-CLI configured ==="
