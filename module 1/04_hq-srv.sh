@@ -137,20 +137,27 @@ options {
     allow-query { any; };
     forwarders { $DNS_FORWARDER; };
 
-    # Отключаем IPv6 в резолвере — нет IPv6 connectivity
-    filter-aaaa-on-v4 yes;
-
     dnssec-validation yes;
     recursion yes;
 };
 OPTEOF
 
-# Отключаем IPv6 на уровне ОС для named
-if ! grep -q "OPTIONS" /etc/sysconfig/named 2>/dev/null; then
-    echo 'OPTIONS="-4"' >> /etc/sysconfig/named
+# Запускаем named только в IPv4-режиме (нет IPv6 connectivity)
+# Метод 1: /etc/sysconfig/named
+if [ -f /etc/sysconfig/named ]; then
+    grep -q "^OPTIONS" /etc/sysconfig/named         && sed -i 's/^OPTIONS=.*/OPTIONS="-4"/' /etc/sysconfig/named         || echo 'OPTIONS="-4"' >> /etc/sysconfig/named
 else
-    sed -i 's/^OPTIONS=.*/OPTIONS="-4"/' /etc/sysconfig/named
+    echo 'OPTIONS="-4"' > /etc/sysconfig/named
 fi
+
+# Метод 2: systemd override (более надёжно на ALT Linux)
+mkdir -p /etc/systemd/system/bind.service.d
+cat > /etc/systemd/system/bind.service.d/ipv4only.conf <<SDEOF
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/named -f -4 $OPTIONS
+SDEOF
+systemctl daemon-reload
 chown named:named /etc/bind/options.conf
 chmod 640 /etc/bind/options.conf
 
