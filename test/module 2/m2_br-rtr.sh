@@ -1,36 +1,49 @@
 #!/bin/bash
 # ============================================================
 # MODULE 2 — BR-RTR
-# Задание 1: Chrony (клиент)
-# Задание 7: nftables DNAT
-# Туннель GRE + OSPF (FRR)
+# Task 1: Chrony — NTP client -> ISP (172.16.2.14)
+# Task 7: nftables DNAT (port forwarding: 8080->BR-SRV:8080, 2026->BR-SRV:2026)
+# Extra:  GRE tunnel + OSPF via FRR
+# PDF ref: Второй.pdf task 1, task 7; Первый.pdf pages 8-10
 # ============================================================
 set -e
 
-echo "[*] === BR-RTR: MODULE 2 ==="
+echo "[*] ========================================"
+echo "[*]  MODULE 2 — BR-RTR"
+echo "[*] ========================================"
 
 # ============================================================
-# ЗАДАНИЕ 1: CHRONY — NTP-клиент
+# TASK 1: CHRONY — NTP CLIENT
 # ============================================================
-echo "[*] [1] Настраиваем Chrony (клиент NTP -> ISP)..."
+echo ""
+echo "[*] [Task 1] Configuring Chrony NTP client -> ISP (172.16.2.14)..."
 apt-get install -y chrony
 
+# Per PDF: BR devices use server 172.16.2.14 (ISP ens21 address)
 cat > /etc/chrony.conf << 'EOF'
+# BR-RTR NTP client — sync from ISP
 server 172.16.2.14 iburst prefer
 EOF
 
 systemctl enable --now chronyd
 systemctl restart chronyd
-sleep 2
-chronyc sources
-echo "[+] Chrony клиент настроен"
+sleep 3
+echo "[+] Chrony NTP client configured (server: 172.16.2.14)"
+chronyc sources 2>/dev/null || true
 
 # ============================================================
-# ЗАДАНИЕ 7: NAT + DNAT
+# TASK 7: nftables — NAT + DNAT
 # ============================================================
-echo "[*] [7] Настраиваем nftables (NAT + DNAT)..."
+echo ""
+echo "[*] [Task 7] Configuring nftables NAT + DNAT..."
 
-cat >> /etc/nftables/nftables.nft << 'EOF'
+if grep -q 'chain prerouting' /etc/nftables/nftables.nft 2>/dev/null; then
+  echo "[!] prerouting chain already exists — skipping"
+else
+  # Per PDF: BR-RTR forwards:
+  #   tcp dport 8080 -> BR-SRV:8080 (Docker web app)
+  #   tcp dport 2026 -> BR-SRV:2026 (SSH)
+  cat >> /etc/nftables/nftables.nft << 'EOF'
 
 table inet nat {
   chain postrouting {
@@ -44,15 +57,22 @@ table inet nat {
   }
 }
 EOF
+  echo "[+] DNAT rules added"
+fi
 
 systemctl restart nftables
-systemctl status nftables --no-pager
+echo "[+] nftables DNAT configured"
+echo "    172.16.2.1:8080 -> 192.168.4.2:8080"
+echo "    172.16.2.1:2026 -> 192.168.4.2:2026"
+nft list table inet nat 2>/dev/null || true
 
 # ============================================================
-# ТУННЕЛЬ GRE
+# GRE TUNNEL — BR side (10.5.5.2/30)
 # ============================================================
-echo "[*] Настраиваем GRE-туннель..."
+echo ""
+echo "[*] Configuring GRE tunnel (Variant 1)..."
 mkdir -p /etc/net/ifaces/tun
+
 cat > /etc/net/ifaces/tun/options << 'EOF'
 TYPE=iptun
 TUNTYPE=gre
@@ -63,21 +83,40 @@ HOST=ens19
 EOF
 
 echo '10.5.5.2/30' > /etc/net/ifaces/tun/ipv4address
+echo "[+] GRE tunnel config written"
+echo "    Local:  172.16.2.1 (BR-RTR ens19)"
+echo "    Remote: 172.16.1.1 (HQ-RTR ens19)"
+echo "    Tunnel IP: 10.5.5.2/30"
+
 systemctl restart network
-
-echo "[*] Проверяем туннель..."
-ping -c 2 10.5.5.1 || echo "[!] Туннель ещё не поднят — проверь HQ-RTR"
+sleep 2
+echo "[*] Testing tunnel to HQ-RTR (10.5.5.1)..."
+if ping -c 2 -W 3 10.5.5.1 &>/dev/null; then
+  echo "[+] GRE tunnel: OK"
+else
+  echo "[!] Tunnel unreachable — ensure HQ-RTR is configured first"
+fi
 
 # ============================================================
-# OSPF через FRR
+# OSPF via FRR
 # ============================================================
-echo "[*] Настраиваем OSPF (FRR)..."
-sed -i 's/ospfd=no/ospfd=yes/' /etc/frr/daemons
+echo ""
+echo "[*] Configuring OSPF routing (FRR)..."
+
+if [ -f /etc/frr/daemons ]; then
+  sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons
+else
+  apt-get install -y frr
+  sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons
+fi
+
 systemctl enable --now frr
 systemctl restart frr
+sleep 2
 
+# Per PDF: BR-RTR advertises 10.5.5.0/30 and 192.168.4.0/28
 vtysh << 'VTYSH_EOF'
-conf t
+configure terminal
 router ospf
  passive-interface default
  network 10.5.5.0/30 area 0
@@ -91,8 +130,22 @@ interface tun
  ip ospf authentication-key P@ssw0rd
 exit
 exit
-wr
+write memory
 VTYSH_EOF
 
-echo "[+] OSPF настроен. Проверь: vtysh -c 'show ip route ospf'"
-echo "[+] === BR-RTR MODULE 2: Завершено ==="
+echo "[+] OSPF configured"
+echo "    Networks: 10.5.5.0/30, 192.168.4.0/28"
+echo "    Area 0 auth key: P@ssw0rd"
+
+echo ""
+echo "[*] --- Verification ---"
+echo "    Chrony:   $(systemctl is-active chronyd)"
+echo "    nftables: $(systemctl is-active nftables)"
+echo "    FRR:      $(systemctl is-active frr)"
+vtysh -c 'show ip route ospf' 2>/dev/null || true
+echo ""
+echo "[+] ========================================"
+echo "[+]  BR-RTR MODULE 2 — COMPLETE"
+echo "[!]  Check OSPF: vtysh -c 'show ip route ospf'"
+echo "[!]  Check tunnel: ping 10.5.5.1"
+echo "[+] ========================================"

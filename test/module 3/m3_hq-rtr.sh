@@ -1,20 +1,27 @@
 #!/bin/bash
 # ============================================================
 # MODULE 3 — HQ-RTR
-# Задание 3: IPsec (StrongSwan) для GRE-туннеля
-# Задание 4: Межсетевой экран (nftables filter)
-# Задание 6: Rsyslog (клиент -> HQ-SRV)
+# Task 3: IPsec (StrongSwan) to protect GRE tunnel
+# Task 4: Firewall — nftables filter (input/forward policy drop)
+# Task 6: Rsyslog client — send logs to HQ-SRV
+# PDF ref: Третий.pdf tasks 3, 4, 6
+# NOTE: Task 3 per PDF "does not work on verification, no errors"
 # ============================================================
 set -e
 
-echo "[*] === HQ-RTR: MODULE 3 ==="
+echo "[*] ========================================"
+echo "[*]  MODULE 3 — HQ-RTR"
+echo "[*] ========================================"
 
 # ============================================================
-# ЗАДАНИЕ 3: IPSEC (StrongSwan)
+# TASK 3: IPSEC (StrongSwan) — tunnel encryption
 # ============================================================
-echo "[*] [3] Настраиваем IPsec (StrongSwan)..."
+echo ""
+echo "[*] [Task 3] Configuring IPsec (StrongSwan) for GRE tunnel..."
 apt-get install -y strongswan
 
+# Per PDF: ipsec.conf — protect GRE protocol between tunnel endpoints
+# HQ side: left=10.5.5.1, right=10.5.5.2
 cat > /etc/strongswan/ipsec.conf << 'EOF'
 config setup
 
@@ -29,43 +36,108 @@ conn gre
   pfs=no
 EOF
 
+# Pre-shared key
 cat > /etc/strongswan/ipsec.secrets << 'EOF'
 10.5.5.1 10.5.5.2 : PSK "P@ssw0rd"
 EOF
+chmod 600 /etc/strongswan/ipsec.secrets
+echo "[+] IPsec config written"
+echo "    Conn: gre, left=10.5.5.1, right=10.5.5.2, PSK=P@ssw0rd"
 
 systemctl enable --now strongswan-starter
 systemctl restart strongswan-starter
-echo "[+] IPsec настроен. Проверь: tcpdump -i ens19 -n -p esp"
+sleep 2
+echo "[+] StrongSwan started"
+echo "[!] Note: PDF states verification may fail despite no errors"
+echo "[!] Verify: tcpdump -i ens19 -n esp  (on BR-RTR)"
 
 # ============================================================
-# ЗАДАНИЕ 4: МЕЖСЕТЕВОЙ ЭКРАН (nftables filter)
+# TASK 4: FIREWALL — nftables filter table
 # ============================================================
-echo "[*] [4] Настраиваем nftables firewall (filter)..."
+echo ""
+echo "[*] [Task 4] Configuring nftables firewall (filter table)..."
 
-# Добавляем таблицу filter в конфиг
-cat >> /etc/nftables/nftables.nft << 'EOF'
+# Per PDF: add filter table with input/forward policy=drop
+# Allow: established+related, specific TCP/UDP ports, ICMP, ESP, GRE, OSPF
+# IMPORTANT: Add AFTER existing nat table — do not duplicate
+
+if grep -q 'table inet filter' /etc/nftables/nftables.nft 2>/dev/null; then
+  echo "[!] filter table already in nftables.nft — skipping"
+else
+  cat >> /etc/nftables/nftables.nft << 'EOF'
 
 table inet filter {
   chain input {
-    type filter hook input priority 0; policy drop;
+    type filter hook input priority 0;
+    policy drop;
     log prefix "Dropped Input: " level debug
+
+    # Always allow loopback
     iif lo accept
+
+    # Allow established/related connections
     ct state established, related accept
-    tcp dport { 22, 514, 53, 80, 443, 3015, 445, 139, 88, 2026, 8080, 2049, 389, 631 } accept
-    udp dport { 53, 123, 500, 4500, 88, 137, 8080, 2049, 631 } accept
+
+    # Allowed TCP services
+    tcp dport {
+      22,    # SSH (local)
+      80,    # HTTP
+      88,    # Kerberos
+      139,   # NetBIOS
+      389,   # LDAP
+      443,   # HTTPS
+      445,   # SMB
+      514,   # Syslog
+      631,   # CUPS
+      2026,  # SSH external
+      2049,  # NFS
+      3015,  # custom
+      8080   # HTTP alt / Docker
+    } accept
+
+    # Allowed UDP services
+    udp dport {
+      53,    # DNS
+      88,    # Kerberos
+      123,   # NTP
+      137,   # NetBIOS
+      500,   # IKE (IPsec)
+      2049,  # NFS
+      4500,  # IPsec NAT-T
+      631,   # CUPS
+      8080
+    } accept
+
+    # Allow ICMP (ping)
     ip protocol icmp accept
+
+    # Allow ESP (IPsec encrypted traffic)
     ip protocol esp accept
+
+    # Allow GRE (tunnel)
     ip protocol gre accept
+
+    # Allow OSPF routing protocol
     ip protocol ospf accept
   }
 
   chain forward {
-    type filter hook forward priority 0; policy drop;
+    type filter hook forward priority 0;
+    policy drop;
     log prefix "Dropped forward: " level debug
+
     iif lo accept
     ct state established, related accept
-    tcp dport { 22, 514, 53, 80, 443, 3015, 445, 139, 88, 2026, 8080, 2049, 389, 631 } accept
-    udp dport { 53, 123, 500, 4500, 88, 137, 8080, 2049, 631 } accept
+
+    tcp dport {
+      22, 80, 88, 139, 389, 443, 445, 514,
+      631, 2026, 2049, 3015, 8080
+    } accept
+
+    udp dport {
+      53, 88, 123, 137, 500, 2049, 4500, 631, 8080
+    } accept
+
     ip protocol icmp accept
     ip protocol esp accept
     ip protocol gre accept
@@ -73,31 +145,54 @@ table inet filter {
   }
 
   chain output {
-    type filter hook output priority 0; policy accept;
+    type filter hook output priority 0;
+    # Allow all outbound by default
+    policy accept;
   }
 }
 EOF
+  echo "[+] Filter table added to nftables.nft"
+fi
 
 systemctl restart nftables
-systemctl status nftables --no-pager
-echo "[+] Межсетевой экран настроен"
+echo "[+] nftables firewall applied"
+nft list ruleset 2>/dev/null | grep -E 'table|chain|policy' | head -20 || true
 
 # ============================================================
-# ЗАДАНИЕ 6: RSYSLOG (Клиент -> HQ-SRV)
+# TASK 6: RSYSLOG CLIENT — send logs to HQ-SRV
 # ============================================================
-echo "[*] [6] Настраиваем Rsyslog (клиент)..."
+echo ""
+echo "[*] [Task 6] Configuring Rsyslog to forward logs to HQ-SRV..."
 apt-get install -y rsyslog
 
+# Per PDF: send *.warn to HQ-SRV (192.168.1.2) on TCP port 514
+# @@ = TCP (@ = UDP)
 cat > /etc/rsyslog.d/rsys.conf << 'EOF'
+# Load input modules
 module(load="imjournal")
 module(load="imuxsock")
 
-# Отправка логов на HQ-SRV (192.168.1.2)
+# Forward all warnings to central log server (HQ-SRV)
 *.warn @@192.168.1.2:514
 EOF
 
 systemctl enable --now rsyslog
 systemctl restart rsyslog
-echo "[+] Rsyslog клиент настроен (отправка на 192.168.1.2:514)"
+echo "[+] Rsyslog client configured -> 192.168.1.2:514 (TCP)"
 
-echo "[+] === HQ-RTR MODULE 3: Завершено ==="
+# --- Final verification ---
+echo ""
+echo "[*] --- Verification ---"
+echo "    StrongSwan: $(systemctl is-active strongswan-starter)"
+echo "    nftables:   $(systemctl is-active nftables)"
+echo "    Rsyslog:    $(systemctl is-active rsyslog)"
+echo ""
+echo "    nftables tables:"
+nft list tables 2>/dev/null || true
+echo ""
+echo "[!] IPsec check: ipsec status"
+echo "[!] ESP capture: tcpdump -i ens19 -n esp (run on BR-RTR)"
+echo ""
+echo "[+] ========================================"
+echo "[+]  HQ-RTR MODULE 3 — COMPLETE"
+echo "[+] ========================================"
