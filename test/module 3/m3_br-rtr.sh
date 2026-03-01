@@ -12,6 +12,17 @@ echo "[*] ========================================"
 echo "[*]  MODULE 3 — BR-RTR"
 echo "[*] ========================================"
 
+# Detect WAN interface (saved by Module 1, or from routing table)
+WAN_IFACE=""
+[ -f /root/iface_vars.sh ] && source /root/iface_vars.sh && WAN_IFACE="${BR_RTR_WAN:-}"
+[ -z "$WAN_IFACE" ] && WAN_IFACE=$(ip route show default 2>/dev/null \
+  | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+[ -z "$WAN_IFACE" ] && WAN_IFACE=$(ip -o link show \
+  | awk -F': ' '{print $2}' \
+  | grep -Ev '^(lo|sit|tun|tap|veth|br-|docker|ovs|virbr|bond|dummy|vlan)' \
+  | sort | head -1)
+echo "[*] WAN interface: $WAN_IFACE"
+
 # ============================================================
 # TASK 3: IPSEC (StrongSwan) — tunnel encryption (BR side)
 # ============================================================
@@ -48,7 +59,7 @@ echo "[+] StrongSwan started"
 
 # Verify ESP packets (need tcpdump on BR side)
 echo "[*] Checking for ESP packets (5 second capture)..."
-timeout 5 tcpdump -i ens19 -n esp -c 3 2>/dev/null && \
+timeout 5 tcpdump -i "${WAN_IFACE}" -n esp -c 3 2>/dev/null && \
   echo "[+] ESP packets detected — IPsec is working" || \
   echo "[!] No ESP packets detected — check HQ-RTR IPsec"
 

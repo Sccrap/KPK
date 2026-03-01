@@ -54,7 +54,7 @@ echo "=== [2/3] Configuring nftables firewall ==="
 
 cp "${NFTABLES_CONF}" "${NFTABLES_CONF}.bak" 2>/dev/null || true
 
-cat > "${NFTABLES_CONF}" <<'NFTCONF'
+cat >> "${NFTABLES_CONF}" <<'NFTCONF'
 #!/usr/sbin/nft -f
 flush ruleset
 

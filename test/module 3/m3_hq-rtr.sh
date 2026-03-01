@@ -13,6 +13,17 @@ echo "[*] ========================================"
 echo "[*]  MODULE 3 — HQ-RTR"
 echo "[*] ========================================"
 
+# Detect WAN interface (saved by Module 1, or from routing table)
+WAN_IFACE=""
+[ -f /root/iface_vars.sh ] && source /root/iface_vars.sh && WAN_IFACE="${HQ_RTR_WAN:-}"
+[ -z "$WAN_IFACE" ] && WAN_IFACE=$(ip route show default 2>/dev/null \
+  | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+[ -z "$WAN_IFACE" ] && WAN_IFACE=$(ip -o link show \
+  | awk -F': ' '{print $2}' \
+  | grep -Ev '^(lo|sit|tun|tap|veth|br-|docker|ovs|virbr|bond|dummy|vlan|hq-sw)' \
+  | sort | head -1)
+echo "[*] WAN interface: $WAN_IFACE"
+
 # ============================================================
 # TASK 3: IPSEC (StrongSwan) — tunnel encryption
 # ============================================================
@@ -49,7 +60,7 @@ systemctl restart strongswan-starter
 sleep 2
 echo "[+] StrongSwan started"
 echo "[!] Note: PDF states verification may fail despite no errors"
-echo "[!] Verify: tcpdump -i ens19 -n esp  (on BR-RTR)"
+echo "[!] Verify: tcpdump -i ${WAN_IFACE} -n esp  (on BR-RTR)"
 
 # ============================================================
 # TASK 4: FIREWALL — nftables filter table
@@ -191,7 +202,7 @@ echo "    nftables tables:"
 nft list tables 2>/dev/null || true
 echo ""
 echo "[!] IPsec check: ipsec status"
-echo "[!] ESP capture: tcpdump -i ens19 -n esp (run on BR-RTR)"
+echo "[!] ESP capture: tcpdump -i ${WAN_IFACE} -n esp (run on BR-RTR)"
 echo ""
 echo "[+] ========================================"
 echo "[+]  HQ-RTR MODULE 3 — COMPLETE"

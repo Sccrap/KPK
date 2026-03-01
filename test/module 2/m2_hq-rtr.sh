@@ -13,6 +13,32 @@ echo "[*]  MODULE 2 — HQ-RTR"
 echo "[*] ========================================"
 
 # ============================================================
+# DETECT WAN INTERFACE (carry over from Module 1)
+# ============================================================
+WAN_IFACE=""
+# Load saved vars if Module 1 was run on this host
+if [ -f /root/iface_vars.sh ]; then
+  source /root/iface_vars.sh
+  WAN_IFACE="${HQ_RTR_WAN:-}"
+  [ -n "$WAN_IFACE" ] && echo "[+] WAN loaded from /root/iface_vars.sh: $WAN_IFACE"
+fi
+# Fallback: read from active default route
+if [ -z "$WAN_IFACE" ]; then
+  WAN_IFACE=$(ip route show default 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)
+  [ -n "$WAN_IFACE" ] && echo "[+] WAN via default route: $WAN_IFACE"
+fi
+# Final fallback: first physical NIC
+if [ -z "$WAN_IFACE" ]; then
+  WAN_IFACE=$(ip -o link show \
+    | awk -F': ' '{print $2}' \
+    | grep -Ev '^(lo|sit|tun|tap|veth|br-|docker|ovs|virbr|bond|dummy|vlan|hq-sw)' \
+    | sort | head -1)
+  echo "[!] WAN fallback (first NIC): $WAN_IFACE"
+fi
+echo "[*] Using WAN interface: $WAN_IFACE"
+
+# ============================================================
 # TASK 1: CHRONY — NTP CLIENT
 # ============================================================
 echo ""
@@ -50,7 +76,7 @@ else
 table inet nat {
   chain postrouting {
     type nat hook postrouting priority srcnat;
-    oifname "ens19" masquerade
+    oifname "${WAN_IFACE}" masquerade
   }
   chain prerouting {
     type nat hook prerouting priority filter;
@@ -59,7 +85,7 @@ table inet nat {
   }
 }
 EOF
-  echo "[+] DNAT rules added"
+  echo "[+] DNAT rules added (WAN=$WAN_IFACE)"
 fi
 
 systemctl restart nftables
@@ -77,13 +103,13 @@ echo "[*] Configuring GRE tunnel (Variant 1 — /etc/net/ifaces/tun)..."
 # Per PDF Variant 1: create iface dir with options file
 mkdir -p /etc/net/ifaces/tun
 
-cat > /etc/net/ifaces/tun/options << 'EOF'
+cat > /etc/net/ifaces/tun/options << EOF
 TYPE=iptun
 TUNTYPE=gre
 TUNLOCAL=172.16.1.1
 TUNREMOTE=172.16.2.1
 TUNOPTIONS='ttl 64'
-HOST=ens19
+HOST=${WAN_IFACE}
 EOF
 
 echo '10.5.5.1/30' > /etc/net/ifaces/tun/ipv4address
